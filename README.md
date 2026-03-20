@@ -3,8 +3,8 @@ Update all in4 from subject as project
 # 🚗 Vehicle Speed Estimation Using a Single Camera and Computer Vision Techniques
 
 > **Course:** Digital Image Processing (DIPR)  
-> **Institution:** HCMC University of Technology and Education (HCMUTE)  
-> **Group:** 3 — Faculty of Information Technology
+> **Institution:** HCMC University of Technology and Engineering (HCMUTE)  
+> **Group:** 2 — Faculty of Information Technology
 
 ---
 
