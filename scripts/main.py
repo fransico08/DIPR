@@ -17,13 +17,15 @@ from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
 
 import tkinter as tk
-from tkinter import filedialog, simpledialog, messagebox, ttk
+from tkinter import filedialog
 from ui.app_window import AppWindow
 from ui.calibration_window import run_calibration_window
 from utils.frame_reader import FrameReader
 from utils.drawing import get_color, draw_track, draw_roi, draw_hud
 from utils.screen import get_screen_size, fit_to_screen
-from config import MODEL_PATH, SIDEBAR_W, ROAD_WIDTH_M, ROAD_LENGTH_M, DEFAULT_IMG_PTS, VEHICLE_CLASSES, CONF_THRESHOLD, IOU_THRESHOLD, YOLO_IMGSZ, DETECT_EVERY, MAX_AGE, N_INIT, MAX_IOU_DIST, SPEED_WINDOW, MIN_HISTORY, SPEED_SMOOTH
+from utils.ui_helpers import SIDEBAR_W
+
+from config import MODEL_PATH, ROAD_WIDTH_M, ROAD_LENGTH_M, DEFAULT_IMG_PTS, VEHICLE_CLASSES, CONF_THRESHOLD, IOU_THRESHOLD, YOLO_IMGSZ, DETECT_EVERY, MAX_AGE, N_INIT, MAX_IOU_DIST, SPEED_WINDOW, MIN_HISTORY, SPEED_SMOOTH
 
 # =============================================================
 #  HSV HISTOGRAM EMBEDDER
@@ -88,7 +90,8 @@ class HomographyCalibrator:
             self._H           = d["H"]
             self.real_w       = float(d.get("real_w", ROAD_WIDTH_M))
             self.real_l       = float(d.get("real_l", ROAD_LENGTH_M))
-            print(f"[Calibration] Loaded -> {path}"); return True
+            print(f"[Calibration] Loaded -> {path}")
+            return True
         except Exception: return False
 
     def apply_points(self, clicked, w_m, l_m):
@@ -155,12 +158,12 @@ def make_tracker():
 def run_pipeline(video_path, calibrator):
     global _cmap
     _cmap = {}
-    import PIL.Image, PIL.ImageTk
 
     print(f"[INFO] Loading model: {MODEL_PATH}")
     model = YOLO(MODEL_PATH)
     try:
-        import torch; use_cuda = torch.cuda.is_available()
+        import torch
+        use_cuda = torch.cuda.is_available()
     except Exception: use_cuda = False
     print(f"[INFO] CUDA: {use_cuda}")
 
@@ -187,7 +190,8 @@ def run_pipeline(video_path, calibrator):
     def do_reset():
         nonlocal tracker
         tracker = make_tracker()
-        speed_est.reset(); _cmap.clear()
+        speed_est.reset()
+        _cmap.clear()
         print("[INFO] Tracker reset.")
 
     def do_pause():
@@ -237,8 +241,6 @@ def run_pipeline(video_path, calibrator):
     app.root.bind("<KeyPress>", _key)
     app.root.focus_force()
 
-    print("[INFO] Running  SPACE=pause  R=reset  S=screenshot  L=load  ESC=quit")
-
     while not stopped:
         if paused:
             try:
@@ -250,7 +252,8 @@ def run_pipeline(video_path, calibrator):
 
         if reader.is_done():
             print("[INFO] Video finished.")
-            paused = True; continue
+            paused = True
+            continue
 
         try:
             frame, ts_ms, fno = reader.read()
@@ -327,16 +330,9 @@ def run_pipeline(video_path, calibrator):
 # =============================================================
 
 def main():
-    try:
-        import PIL.Image, PIL.ImageTk
-    except ImportError:
-        root = tk.Tk(); root.withdraw()
-        messagebox.showerror("Missing dependency",
-            "Pillow is required.\nInstall with:  pip install Pillow")
-        root.destroy(); return
-
     # 1. Pick video
-    root = tk.Tk(); root.withdraw()
+    root = tk.Tk()
+    root.withdraw()
     video_path = filedialog.askopenfilename(
         title="Select video file",
         filetypes=[("Video files","*.mp4 *.avi *.mov *.mkv *.wmv"),
@@ -344,7 +340,8 @@ def main():
     )
     root.destroy()
     if not video_path:
-        print("[INFO] No video selected. Exiting."); return
+        print("[INFO] No video selected. Exiting.")
+        return
 
     # 2. Calibration window (no messagebox — goes straight to window)
     calibrator = HomographyCalibrator()
@@ -354,7 +351,8 @@ def main():
     while True:
         result = run_pipeline(video_path, calibrator)
         if result == "load_new":
-            root2 = tk.Tk(); root2.withdraw()
+            root2 = tk.Tk()
+            root2.withdraw()
             video_path = filedialog.askopenfilename(
                 title="Select video file",
                 filetypes=[("Video files","*.mp4 *.avi *.mov *.mkv *.wmv"),
