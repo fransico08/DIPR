@@ -1,7 +1,10 @@
 import cv2
 import tkinter as tk
 from tkinter import ttk
-from config import SIDEBAR_W
+from utils.ui_helpers import SIDEBAR_W, COLOR_SIDEBAR_BG, create_label_title, create_label_frame, create_label_variable, create_button, create_button_inline
+
+SEEK_STEP_SHORT = 5
+SEEK_STEP_LONG = 10
 
 class AppWindow:
     def __init__(self, video_w, video_h,
@@ -22,37 +25,40 @@ class AppWindow:
         self.root.resizable(False, False)
         self.root.geometry(f"{video_w + SIDEBAR_W}x{video_h}")
 
-        # Canvas
+# =============================================================================
+# Canvas
+# =============================================================================
         self.canvas = tk.Canvas(self.root, width=video_w, height=video_h,
                                 bg="black", highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self._photo = None
 
-        # Sidebar
-        sb = tk.Frame(self.root, bg="#1a1a2e", width=SIDEBAR_W)
+# =============================================================================
+# Sidebar
+# =============================================================================
+        sb = tk.Frame(self.root, bg=COLOR_SIDEBAR_BG, width=SIDEBAR_W)
         sb.grid(row=0, column=1, sticky="nsew")
         sb.grid_propagate(False)
         self.root.columnconfigure(1, minsize=SIDEBAR_W)
 
-        tk.Label(sb, text="CONTROLS", bg="#16213e", fg="#80d2ff",
-                 font=("Consolas",11,"bold"), pady=8).pack(fill="x")
+        create_label_title(sb, "CONTROLS")
 
-        # Stats
-        sf = tk.LabelFrame(sb, text="Live Stats", bg="#1a1a2e", fg="#aaa",
-                           font=("Consolas",9), padx=6, pady=4)
-        sf.pack(fill="x", padx=8, pady=(8,4))
+
+# =============================================================================
+# Stats
+# =============================================================================
+        sf = create_label_frame(sb, "Live Stats")
         self._fv = tk.StringVar(value="FPS: --")
         self._tv = tk.StringVar(value="Tracked: --")
         self._cv = tk.StringVar(value="Homography: --")
         self._sv = tk.StringVar(value="Status: starting")
         for v in [self._fv, self._tv, self._cv, self._sv]:
-            tk.Label(sf, textvariable=v, anchor="w", bg="#1a1a2e",
-                     fg="#ddd", font=("Consolas",9)).pack(fill="x")
+            create_label_variable(sf, v)
 
-        # Seekbar
-        vf = tk.LabelFrame(sb, text="Video Position", bg="#1a1a2e", fg="#aaa",
-                            font=("Consolas",9), padx=6, pady=4)
-        vf.pack(fill="x", padx=8, pady=4)
+# =============================================================================
+# Seekbar
+# =============================================================================
+        vf = create_label_frame(sb, "Video Position")
         self._pos_v  = tk.StringVar(value="Frame: 0 / 0")
         tk.Label(vf, textvariable=self._pos_v, anchor="w", bg="#1a1a2e",
                  fg="#ccc", font=("Consolas",9)).pack(fill="x")
@@ -61,60 +67,40 @@ class AppWindow:
                   orient="horizontal", variable=self._seek_v,
                   command=lambda v: self._on_seek(int(float(v)))
                   ).pack(fill="x", pady=(4,2))
-        ff = tk.Frame(vf, bg="#1a1a2e"); ff.pack(fill="x")
-        for lbl, sec in [("<<10s",-10),("<5s",-5),("+5s>",5),("+10s>>",10)]:
-            df = int(sec * fps_src)
-            tk.Button(ff, text=lbl, bg="#2c3e50", fg="white",
-                      font=("Consolas",8), relief="flat", padx=2,
-                      command=lambda d=df: self._seek_rel(d)
-                      ).pack(side="left", expand=True, fill="x", padx=1, pady=2)
-
-        # Buttons
-        bf = tk.LabelFrame(sb, text="Controls", bg="#1a1a2e", fg="#aaa",
-                           font=("Consolas",9), padx=6, pady=4)
-        bf.pack(fill="x", padx=8, pady=4)
-        for text, cmd, bg in [
-            ("Pause / Resume  [SPACE]", on_pause,          "#2d6a4f"),
-            ("Reset Tracker   [R]",     on_reset,           "#1d3557"),
-            ("Screenshot      [S]",     on_screenshot,      "#457b9d"),
-            ("Replay Video",            self._replay,       "#374151"),
-            ("Load New Video  [L]",     on_load_video,      "#5c4033"),
+        ff = tk.Frame(vf, bg="#1a1a2e")
+        ff.pack(fill="x")
+        
+        for lbl, sec in [
+            (f"<<{SEEK_STEP_LONG}s", -SEEK_STEP_LONG),
+            (f"<{SEEK_STEP_SHORT}s", -SEEK_STEP_SHORT),
+            (f"+{SEEK_STEP_SHORT}s>", SEEK_STEP_SHORT),
+            (f"+{SEEK_STEP_LONG}s>>", SEEK_STEP_LONG)
         ]:
-            tk.Button(bf, text=text, command=cmd, bg=bg, fg="white",
-                      font=("Consolas",9,"bold"), relief="flat",
-                      padx=4, pady=5, cursor="hand2", anchor="w"
-                      ).pack(fill="x", pady=2)
+            df = int(sec * fps_src)
+            create_button_inline(ff, text=lbl, command=lambda d=df: self._seek_rel(d))
 
-        # Quit — calls _hard_quit directly, no confirm dialog
-        tk.Button(bf, text="Quit  [ESC]",
-                  command=self._hard_quit,
-                  bg="#9b2226", fg="white",
-                  font=("Consolas",9,"bold"), relief="flat",
-                  padx=4, pady=5, cursor="hand2", anchor="w"
-                  ).pack(fill="x", pady=2)
-
-        # Calibration guide
-        gf = tk.LabelFrame(sb, text="Calibration Guide", bg="#1a1a2e", fg="#aaa",
-                           font=("Consolas",9), padx=6, pady=4)
-        gf.pack(fill="x", padx=8, pady=(4,8))
-        tk.Label(gf, text=(
-            "Click 4 road points:\n"
-            "  1=Top-Left  2=Top-Right\n"
-            "  3=Bot-Left  4=Bot-Right\n\n"
-            "Right-click / Z = undo\n"
-            "R = reset all\n"
-            "ENTER = confirm\n\n"
-            "Good refs: lane lines,\n"
-            "crosswalk, parking bay."
-        ), anchor="w", justify="left", bg="#1a1a2e",
-           fg="#bbb", font=("Consolas",8)).pack(fill="x")
-
+# =============================================================================
+# Buttons
+# =============================================================================
+        bf = create_label_frame(sb, "Actions")
+        for text, cmd in [
+            ("Pause / Resume  [SPACE]", on_pause),
+            ("Reset Tracker   [R]", on_reset),
+            ("Screenshot      [S]", on_screenshot),
+            ("Replay Video    ", self._replay),
+            ("Load New Video  [L]", on_load_video),
+            ("Quit            [ESC]", self._hard_quit),
+        ]:
+            create_button(bf, text=text, command=cmd)
+            
     def _seek_rel(self, delta):
         t = max(0, min(self._total-1, self._seek_v.get() + delta))
-        self._seek_v.set(t); self._on_seek(t)
+        self._seek_v.set(t)
+        self._on_seek(t)
 
     def _replay(self):
-        self._seek_v.set(0); self._on_seek(0)
+        self._seek_v.set(0)
+        self._on_seek(0)
 
     def _hard_quit(self):
         """Immediately destroy window and signal quit — no confirm dialog."""
