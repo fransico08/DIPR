@@ -25,7 +25,13 @@ from utils.drawing import get_color, draw_track, draw_roi, draw_hud
 from utils.screen import get_screen_size, fit_to_screen
 from utils.ui_helpers import SIDEBAR_W
 
-from config import MODEL_PATH, ROAD_WIDTH_M, ROAD_LENGTH_M, DEFAULT_IMG_PTS, VEHICLE_CLASSES, CONF_THRESHOLD, IOU_THRESHOLD, YOLO_IMGSZ, DETECT_EVERY, MAX_AGE, N_INIT, MAX_IOU_DIST, SPEED_WINDOW, MIN_HISTORY, SPEED_SMOOTH
+from config import (MODEL_PATH, ROAD_WIDTH_M, ROAD_LENGTH_M, DEFAULT_IMG_PTS,
+                    VEHICLE_CLASSES, CONF_THRESHOLD, IOU_THRESHOLD, YOLO_IMGSZ,
+                    DETECT_EVERY, MAX_AGE, N_INIT, MAX_IOU_DIST,
+                    SPEED_WINDOW, MIN_HISTORY, SPEED_SMOOTH,
+                    DEFAULT_CAM_HEIGHT_M, DEFAULT_CAM_TILT_DEG,
+                    DEFAULT_CAM_FOV_H_DEG, DEFAULT_ROAD_SLOPE_DEG,
+                    AUTO_ROI_TOP, AUTO_ROI_BOT)
 
 # =============================================================
 #  HSV HISTOGRAM EMBEDDER
@@ -99,6 +105,89 @@ class HomographyCalibrator:
         self._compute(np.float32(clicked),
                       np.float32([[0,0],[w_m,0],[0,l_m],[w_m,l_m]]))
         print(f"[Calibration] Done! {w_m}m x {l_m}m | Points: {clicked}")
+
+    def apply_camera_params(self, img_w, img_h,
+                            cam_height_m=DEFAULT_CAM_HEIGHT_M,
+                            tilt_deg=DEFAULT_CAM_TILT_DEG,
+                            fov_h_deg=DEFAULT_CAM_FOV_H_DEG,
+                            slope_deg=DEFAULT_ROAD_SLOPE_DEG):
+        """
+        Auto-compute homography from pinhole camera geometry.
+        Width and length are derived analytically — no manual point click needed.
+
+        World frame: X=right, Y=forward, Z=up
+        Camera: X_c=right, Y_c=down(image), Z_c=forward(into scene)
+        """
+        theta = math.radians(tilt_deg)
+        alpha = math.radians(slope_deg)
+
+        # Focal length from horizontal FOV
+        f  = (img_w / 2.0) / math.tan(math.radians(fov_h_deg) / 2.0)
+        cx, cy = img_w / 2.0, img_h / 2.0
+
+        # Rotation: camera → world
+        # col0=X_c→world, col1=Y_c→world, col2=Z_c→world
+        R = np.array([
+            [1,  0,                   0               ],
+            [0, -math.sin(theta),  math.cos(theta) ],
+            [0, -math.cos(theta), -math.sin(theta) ],
+        ], dtype=np.float64)
+
+        C = np.array([0.0, 0.0, cam_height_m])
+
+        # Road plane: n·P = 0 (passes through origin, slope alpha uphill in +Y)
+        n_plane = np.array([0.0, -math.sin(alpha), math.cos(alpha)])
+        nC = float(n_plane @ C)   # = cos(alpha) * cam_height_m
+
+        def _project(u, v):
+            d_cam   = np.array([(u - cx) / f, (v - cy) / f, 1.0])
+            d_world = R @ d_cam
+            denom   = float(n_plane @ d_world)
+            if abs(denom) < 1e-9:
+                return None
+            t = -nC / denom
+            if t < 0:
+                return None
+            P = C + t * d_world
+            return (P[0], P[1])   # (X_right, Y_forward)
+
+        # ROI corners: TL, TR, BL, BR
+        img_pts = np.float32([
+            [int(img_w * 0.10), int(img_h * AUTO_ROI_TOP)],
+            [int(img_w * 0.90), int(img_h * AUTO_ROI_TOP)],
+            [int(img_w * 0.10), int(img_h * AUTO_ROI_BOT)],
+            [int(img_w * 0.90), int(img_h * AUTO_ROI_BOT)],
+        ])
+
+        world_xys = []
+        for u, v in img_pts:
+            wp = _project(float(u), float(v))
+            if wp is None:
+                print("[AutoCal] Cannot project pixel to road — check tilt/height. Using default.")
+                self.set_default()
+                return
+            world_xys.append(wp)
+
+        # Normalise world coords: shift minimum to (0,0).
+        # NOTE: top-image pixels project to LARGER Y (farther from camera), so
+        # we must NOT assume any ordering — use min/max over all 4 points.
+        world_pts  = np.float32(world_xys)          # (4,2): TL, TR, BL, BR
+        min_xy     = world_pts.min(axis=0)
+        world_norm = world_pts - min_xy
+
+        self.real_w = float(world_pts[:, 0].max() - world_pts[:, 0].min())
+        self.real_l = float(world_pts[:, 1].max() - world_pts[:, 1].min())
+
+        if self.real_w <= 0 or self.real_l <= 0:
+            print(f"[AutoCal] Degenerate projection (W={self.real_w:.2f} L={self.real_l:.2f}). Using default.")
+            self.set_default()
+            return
+
+        print(f"[AutoCal] Raw world XYs → TL:{world_xys[0]} TR:{world_xys[1]} "
+              f"BL:{world_xys[2]} BR:{world_xys[3]}")
+        self._compute(img_pts, world_norm)
+        print(f"[AutoCal] W={self.real_w:.2f}m  L={self.real_l:.2f}m | "
+              f"h={cam_height_m}m  tilt={tilt_deg}°  fov={fov_h_deg}°  slope={slope_deg}°")
 
     def _compute(self, img_pts, real_pts):
         self.image_points = [list(p) for p in img_pts]
