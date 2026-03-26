@@ -3,7 +3,9 @@ import os
 
 import tkinter as tk
 from utils.screen import get_screen_size, fit_to_screen
-from config import ROAD_WIDTH_M, ROAD_LENGTH_M
+from config import (ROAD_WIDTH_M, ROAD_LENGTH_M,
+                    DEFAULT_CAM_HEIGHT_M, DEFAULT_CAM_TILT_DEG,
+                    DEFAULT_CAM_FOV_H_DEG, DEFAULT_ROAD_SLOPE_DEG)
 from utils.ui_helpers import SIDEBAR_W, COLOR_SIDEBAR_BG, create_label_title, create_label_frame, create_label, create_entry, create_button
 
 NEEDED_POINT = 4
@@ -62,7 +64,9 @@ def run_calibration_window(video_path, calibrator):
     has_saved = os.path.exists(cal_path)
 
     clicked = []
-    result = [None]   # "new", "load", "default", "cancel"
+    result   = [None]   # "new", "auto", "load", "default", "cancel"
+    img_size = [None]   # [frame_w, frame_h] for apply_camera_params
+    img_size[0] = (cw, ch)
 
     # ── Build Tk window ───────────────────────────────────────
     root = tk.Tk()
@@ -157,20 +161,41 @@ def run_calibration_window(video_path, calibrator):
 # Buttons
 # =============================================================================
     def do_confirm():
-        if len(clicked) != NEEDED_POINT:
-            status_var.set(f"Need exactly {NEEDED_POINT} points!")
-            return
-        try:
-            w = float(width_var.get())
-            l = float(length_var.get())
-        except Exception:
-            status_var.set("Invalid dimensions.")
-            return
-        if w <= 0 or l <= 0:
-            status_var.set("Dimensions must be > 0.")
-            return
-        result[0] = "new"
-        root.quit()
+        if mode_var.get() == "auto":
+            try:
+                h  = float(cam_h_var.get())
+                td = float(cam_tilt_var.get())
+                fv = float(cam_fov_var.get())
+                sl = float(road_slope_var.get())
+            except Exception:
+                status_var.set("Invalid camera parameter value.")
+                return
+            if h <= 0:
+                status_var.set("Camera height must be > 0.")
+                return
+            if not (0 < fv < 180):
+                status_var.set("FOV must be 0–180 deg.")
+                return
+            if not (0 < td < 90):
+                status_var.set("Tilt must be 0–90 deg.")
+                return
+            result[0] = "auto"
+            root.quit()
+        else:
+            if len(clicked) != NEEDED_POINT:
+                status_var.set(f"Need exactly {NEEDED_POINT} points!")
+                return
+            try:
+                w = float(width_var.get())
+                l = float(length_var.get())
+            except Exception:
+                status_var.set("Invalid dimensions.")
+                return
+            if w <= 0 or l <= 0:
+                status_var.set("Dimensions must be > 0.")
+                return
+            result[0] = "new"
+            root.quit()
         
     def undo_last_point():
         if clicked:
@@ -185,6 +210,106 @@ def run_calibration_window(video_path, calibrator):
         result[0] = "default"
         root.quit()
         
+
+# ── Calibration mode toggle ────────────────────────────────────
+    mode_var = tk.StringVar(value="manual")
+
+    def _refresh_mode(*_):
+        if mode_var.get() == "auto":
+            dimf.pack_forget()
+            camf.pack(fill="x", padx=8, pady=4)
+            canvas.config(cursor="arrow")
+            canvas.unbind("<Button-1>")
+            canvas.unbind("<Button-3>")
+        else:
+            camf.pack_forget()
+            dimf.pack(fill="x", padx=8, pady=4)
+            canvas.config(cursor="crosshair")
+            canvas.bind("<Button-1>", on_canvas_click)
+            canvas.bind("<Button-3>", on_canvas_rclick)
+        _update_sidebar_state()
+
+    modef = create_label_frame(sb, "Calibration Mode")
+    tk.Radiobutton(modef, text="Manual (click 4 pts)",
+                   variable=mode_var, value="manual", command=_refresh_mode,
+                   bg=COLOR_SIDEBAR_BG, fg="#ccc", selectcolor="#2c3e50",
+                   activebackground=COLOR_SIDEBAR_BG, font=("Consolas", 9)
+                   ).pack(anchor="w")
+    tk.Radiobutton(modef, text="Auto (camera params)",
+                   variable=mode_var, value="auto", command=_refresh_mode,
+                   bg=COLOR_SIDEBAR_BG, fg="#ccc", selectcolor="#2c3e50",
+                   activebackground=COLOR_SIDEBAR_BG, font=("Consolas", 9)
+                   ).pack(anchor="w")
+
+    # ── Camera params panel (hidden until Auto mode selected) ──
+    camf = create_label_frame(sb, "Camera Parameters")
+    camf.pack_forget()   # hidden by default; shown when mode == "auto"
+
+    create_label(camf, "Height above road (m):")
+    cam_h_var = tk.DoubleVar(value=DEFAULT_CAM_HEIGHT_M)
+    create_entry(camf, cam_h_var)
+
+    create_label(camf, "Tilt/depression angle (deg):")
+    cam_tilt_var = tk.DoubleVar(value=DEFAULT_CAM_TILT_DEG)
+    create_entry(camf, cam_tilt_var)
+
+    create_label(camf, "Horizontal FOV (deg):")
+    cam_fov_var = tk.DoubleVar(value=DEFAULT_CAM_FOV_H_DEG)
+    create_entry(camf, cam_fov_var)
+
+    create_label(camf, "Road slope (deg, uphill+):")
+    road_slope_var = tk.DoubleVar(value=DEFAULT_ROAD_SLOPE_DEG)
+    create_entry(camf, road_slope_var)
+
+    # Live preview of computed W×L
+    preview_var = tk.StringVar(value="W: --  L: --")
+    tk.Label(camf, textvariable=preview_var, anchor="w",
+             bg=COLOR_SIDEBAR_BG, fg="#7dffb3",
+             font=("Consolas", 8), wraplength=220).pack(fill="x", pady=(4,0))
+
+    def _preview_wl(*_):
+        """Compute and display projected W×L without closing the window."""
+        import math, numpy as np
+        try:
+            h  = float(cam_h_var.get())
+            td = float(cam_tilt_var.get())
+            fv = float(cam_fov_var.get())
+            sl = float(road_slope_var.get())
+            fw, fh = img_size[0]
+        except Exception:
+            preview_var.set("W: ?  L: ?")
+            return
+        try:
+            theta = math.radians(td);  alpha = math.radians(sl)
+            f  = (fw / 2.0) / math.tan(math.radians(fv) / 2.0)
+            cx, cy = fw / 2.0, fh / 2.0
+            R = [[1, 0, 0],
+                 [0, -math.sin(theta),  math.cos(theta)],
+                 [0, -math.cos(theta), -math.sin(theta)]]
+            C = [0.0, 0.0, h]
+            n = [0.0, -math.sin(alpha), math.cos(alpha)]
+            nC = n[1]*C[1] + n[2]*C[2]
+            corners = [
+                (int(fw*0.10), int(fh*0.35)), (int(fw*0.90), int(fh*0.35)),
+                (int(fw*0.10), int(fh*0.90)), (int(fw*0.90), int(fh*0.90)),
+            ]
+            pts = []
+            for u, v in corners:
+                dc = [(u-cx)/f, (v-cy)/f, 1.0]
+                dw = [R[r][0]*dc[0]+R[r][1]*dc[1]+R[r][2]*dc[2] for r in range(3)]
+                denom = n[0]*dw[0]+n[1]*dw[1]+n[2]*dw[2]
+                if abs(denom) < 1e-9: raise ValueError
+                t = -nC / denom
+                if t < 0: raise ValueError
+                pts.append((C[0]+t*dw[0], C[1]+t*dw[1]))
+            xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+            W = max(xs)-min(xs);  L = max(ys)-min(ys)
+            preview_var.set(f"ROI → W:{W:.1f}m  L:{L:.1f}m")
+        except Exception:
+            preview_var.set("W: err  L: err (check params)")
+
+    for var in (cam_h_var, cam_tilt_var, cam_fov_var, road_slope_var):
+        var.trace_add("write", _preview_wl)
 
     bf = create_label_frame(sb, "Actions")
 
@@ -214,7 +339,7 @@ def run_calibration_window(video_path, calibrator):
     create_button(bf, "Use Default  [ESC]", use_default)
 
     def _update_sidebar_state():
-        if len(clicked) == NEEDED_POINT:
+        if mode_var.get() == "auto" or len(clicked) == NEEDED_POINT:
             confirm_btn.config(state="normal", bg=COLOR_CONFIRM_ENABLED)
         else:
             confirm_btn.config(state="disabled", bg=COLOR_CONFIRM_DISABLED)
@@ -250,6 +375,21 @@ def run_calibration_window(video_path, calibrator):
         except Exception:
             w_m, l_m = ROAD_WIDTH_M, ROAD_LENGTH_M
         calibrator.apply_points(clicked, w_m, l_m)
+        calibrator.save(cal_path)
+        return True
+
+    elif result[0] == "auto":
+        try:
+            h  = float(cam_h_var.get())
+            td = float(cam_tilt_var.get())
+            fv = float(cam_fov_var.get())
+            sl = float(road_slope_var.get())
+            fw, fh = img_size[0]
+        except Exception as e:
+            print(f"[AutoCal] Error reading params: {e}. Using default.")
+            calibrator.set_default()
+            return True
+        calibrator.apply_camera_params(fw, fh, h, td, fv, sl)
         calibrator.save(cal_path)
         return True
 
