@@ -311,6 +311,235 @@ def run_calibration_window(video_path, calibrator):
     for var in (cam_h_var, cam_tilt_var, cam_fov_var, road_slope_var):
         var.trace_add("write", _preview_wl)
 
+    def _show_3d_preview(*_):
+        """Open a Tk toplevel with an embedded 3-D calibration diagram.
+
+        Left panel  – isometric 3-D: camera position, frustum rays to the
+                      four ROI ground corners, ROI footprint, W/L labels.
+        Right panel – 2-D side view: camera height h, tilt angle θ, near/
+                      far distances on the ground plane.
+        """
+        try:
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            from matplotlib.figure import Figure
+            from mpl_toolkits.mplot3d import Axes3D            # registers '3d'
+            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+        except ImportError:
+            status_var.set("pip install matplotlib")
+            return
+
+        import math as _m, numpy as _np
+
+        # ── gather & validate params ──────────────────────────────────────
+        try:
+            h  = float(cam_h_var.get())
+            td = float(cam_tilt_var.get())
+            fv = float(cam_fov_var.get())
+            sl = float(road_slope_var.get())
+            fw, fh = img_size[0]
+        except Exception:
+            status_var.set("Set valid params first.")
+            return
+        if not (h > 0 and 0 < td < 90 and 0 < fv < 180):
+            status_var.set("Need h>0, tilt 1–89°, FOV 1–179°.")
+            return
+
+        # ── project ROI corners onto the (possibly sloped) road plane ─────
+        theta = _m.radians(td);  alpha = _m.radians(sl)
+        f_px  = (fw / 2.0) / _m.tan(_m.radians(fv) / 2.0)
+        cx, cy = fw / 2.0, fh / 2.0
+        R = _np.array([[1,  0,              0            ],
+                       [0, -_m.sin(theta),  _m.cos(theta)],
+                       [0, -_m.cos(theta), -_m.sin(theta)]])
+        C   = _np.array([0.0, 0.0, h])
+        n_p = _np.array([0.0, -_m.sin(alpha), _m.cos(alpha)])
+        nC  = float(n_p @ C)
+
+        img_corners = [
+            (int(fw * 0.10), int(fh * 0.35)),   # TL
+            (int(fw * 0.90), int(fh * 0.35)),   # TR
+            (int(fw * 0.10), int(fh * 0.90)),   # BL
+            (int(fw * 0.90), int(fh * 0.90)),   # BR
+        ]
+        gpts = []
+        for u, v in img_corners:
+            dc  = _np.array([(u - cx) / f_px, (v - cy) / f_px, 1.0])
+            dw  = R @ dc
+            den = float(n_p @ dw)
+            if abs(den) < 1e-9:
+                status_var.set("Ray parallel to road — adjust tilt."); return
+            t = -nC / den
+            if t < 0:
+                status_var.set("Ray behind camera — increase tilt."); return
+            gpts.append(C + t * dw)        # 3-D point on ground
+
+        tl3, tr3, bl3, br3 = gpts
+        all_x = [p[0] for p in gpts];  all_y = [p[1] for p in gpts]
+        W = max(all_x) - min(all_x)
+        L = max(all_y) - min(all_y)
+        near_y = min(all_y);  far_y = max(all_y)
+        gx0, gx1 = min(all_x) - 1, max(all_x) + 1
+        gy0, gy1 = near_y - 2,     far_y  + 2
+
+        # ── Tk toplevel ───────────────────────────────────────────────────
+        win = tk.Toplevel(root)
+        win.title(f"3D Calibration  h={h}m  tilt={td}°  FOV={fv}°  slope={sl}°  "
+                  f"→  W={W:.1f}m  L={L:.1f}m")
+        win.geometry("980x530")
+        win.configure(bg="#1a1a2e")
+
+        BG = "#1a1a2e"
+        fig = Figure(figsize=(9.8, 5.3), facecolor=BG)
+
+        # ════════════════════════════════════════════════════════════════
+        # LEFT — 3-D perspective view (road narrows to horizon)
+        # ════════════════════════════════════════════════════════════════
+        ax3 = fig.add_subplot(121, projection="3d")
+        ax3.set_facecolor(BG)
+        ax3.tick_params(colors="#666", labelsize=6)
+        ax3.xaxis.pane.fill = ax3.yaxis.pane.fill = ax3.zaxis.pane.fill = False
+        ax3.xaxis.pane.set_edgecolor("#333")
+        ax3.yaxis.pane.set_edgecolor("#333")
+        ax3.zaxis.pane.set_edgecolor("#333")
+        # Perspective projection — road narrows toward horizon
+        try:
+            ax3.set_proj_type('persp', focal_length=0.35)
+        except TypeError:
+            ax3.set_proj_type('persp')
+        # View from behind camera looking forward (+Y); elevation matches tilt
+        ax3.view_init(elev=max(td + 5, 15), azim=-90)
+
+        # Ground grid
+        for gy in _np.arange(_m.floor(gy0), _m.ceil(gy1) + 1, 2):
+            ax3.plot([gx0, gx1], [gy, gy], [0, 0], color="#2a2a2a", lw=0.6)
+        for gx in _np.arange(_m.floor(gx0), _m.ceil(gx1) + 1, 2):
+            ax3.plot([gx, gx], [gy0, gy1], [0, 0], color="#2a2a2a", lw=0.6)
+
+        # ROI footprint — filled polygon on ground
+        roi_v = [[[p[0], p[1], 0] for p in [tl3, tr3, br3, bl3]]]
+        ax3.add_collection3d(Poly3DCollection(
+            roi_v, alpha=0.25, facecolor="#00d4ff", edgecolor="#00d4ff", lw=2))
+
+        # Frustum rays: camera → each ground corner
+        ray_colors = ["#ff6b6b", "#4ecdc4", "#ff9f43", "#a29bfe"]
+        ray_labels = ["TL", "TR", "BL", "BR"]
+        for P, col, lbl in zip(gpts, ray_colors, ray_labels):
+            ax3.plot([C[0], P[0]], [C[1], P[1]], [C[2], P[2]],
+                     color=col, lw=1.3, alpha=0.75)
+            ax3.scatter(P[0], P[1], 0, color=col, s=30, zorder=6)
+            ax3.text(P[0], P[1], 0.4, lbl, color=col, fontsize=7)
+
+        # Camera position
+        ax3.scatter(*C, color="white", s=90, zorder=10)
+        ax3.text(C[0] + 0.2, C[1], C[2] + 0.5,
+                 f"Camera\n({h}m)", color="white", fontsize=7, ha="left")
+        # Nadir — vertical pole from ground to camera (solid, clearly visible)
+        ax3.plot([0, 0], [0, 0], [0, h], color="#a29bfe", lw=2.5, ls="-",
+                 zorder=9, solid_capstyle='round')
+        # Principal axis — line-of-sight (θ below horizontal, in Y-Z plane)
+        pa_3d = min(h / max(_m.sin(theta), 0.05) * 0.55, far_y * 0.6)
+        ax3.quiver(C[0], C[1], C[2],
+                   0, _m.cos(theta) * pa_3d, -_m.sin(theta) * pa_3d,
+                   color="#ffd32a", lw=1.8, arrow_length_ratio=0.12, alpha=0.75)
+
+        # W annotation (near edge)
+        mid_near_y = (bl3[1] + br3[1]) / 2
+        ax3.plot([bl3[0], br3[0]], [mid_near_y] * 2, [0.35] * 2,
+                 color="#f9ca24", lw=1.5)
+        ax3.text((bl3[0] + br3[0]) / 2, mid_near_y, 0.8,
+                 f"W = {W:.1f} m", color="#f9ca24", fontsize=8, ha="center")
+        # L annotation (left edge)
+        ax3.plot([tl3[0] - 0.4] * 2, [tl3[1], bl3[1]], [0.35] * 2,
+                 color="#6ab04c", lw=1.5)
+        ax3.text(tl3[0] - 0.5, (tl3[1] + bl3[1]) / 2, 0.8,
+                 f"L={L:.1f}m", color="#6ab04c", fontsize=8, ha="right")
+
+        ax3.set_xlabel("X  right (m)",   color="#888", fontsize=7, labelpad=3)
+        ax3.set_ylabel("Y  forward (m)", color="#888", fontsize=7, labelpad=3)
+        ax3.set_zlabel("Z  up (m)",      color="#888", fontsize=7, labelpad=3)
+        ax3.set_title(f"3D View   W={W:.1f}m  L={L:.1f}m",
+                      color="white", fontsize=9, pad=5)
+
+        # ════════════════════════════════════════════════════════════════
+        # RIGHT — 2-D side view (Y–Z plane)
+        # ════════════════════════════════════════════════════════════════
+        ax2 = fig.add_subplot(122, facecolor=BG)
+        ax2.tick_params(colors="#888", labelsize=7)
+        for sp in ("bottom", "left"):   ax2.spines[sp].set_color("#555")
+        for sp in ("top",    "right"):  ax2.spines[sp].set_visible(False)
+        ax2.grid(True, color="#252535", lw=0.7, zorder=0)
+
+        # Ground
+        ax2.axhline(0, color="#555", lw=1.5, zorder=2)
+        ax2.fill_between([gy0, gy1], -0.9, 0, color="#1e3a10", alpha=0.5, zorder=1)
+
+        # ROI band on ground
+        ax2.fill_between([near_y, far_y], 0, 0.18,
+                         color="#00d4ff", alpha=0.4, zorder=3)
+        ax2.text((near_y + far_y) / 2, 0.28,
+                 f"ROI  L = {L:.1f} m", color="#00d4ff", fontsize=8, ha="center")
+
+        # Frustum rays (projected to YZ)
+        for P, col in zip(gpts, ray_colors):
+            ax2.plot([0, P[1]], [h, 0], color=col, lw=1.2, alpha=0.65, zorder=4)
+
+        # Camera dot + label
+        ax2.scatter(0, h, color="white", s=80, zorder=10)
+        ax2.text(0.4, h + 0.3, f"h = {h} m", color="white", fontsize=9)
+        # Nadir (vertical dashed — height reference, NOT the angle reference)
+        ax2.plot([0, 0], [0, h], color="#555", lw=1, ls="--", alpha=0.5, zorder=5)
+
+        # ── Tilt angle: measured from HORIZONTAL to line-of-sight ──────
+        # (depression angle below horizontal plane)
+        arc_r = h * 0.38
+
+        # Horizontal reference line (the zero-angle baseline)
+        ax2.plot([0, arc_r * 1.7], [h, h],
+                 color="#aaa", lw=1.2, ls="--", alpha=0.7, zorder=5,
+                 label="horizontal")
+
+        # Principal axis arrow (camera line-of-sight at angle θ below horizontal)
+        pa_len = min(h / max(_m.sin(theta), 0.05) * 0.55, far_y * 0.6)
+        ax2.annotate("",
+                     xy=(pa_len * _m.cos(theta), h - pa_len * _m.sin(theta)),
+                     xytext=(0, h),
+                     arrowprops=dict(arrowstyle="-|>", color="#ffd32a",
+                                     lw=1.8, mutation_scale=12),
+                     zorder=7)
+
+        # Arc from 0 (horizontal) to -θ (depression below horizontal)
+        arc_a = _np.linspace(0, -theta, 40)
+        ax2.plot(arc_r * _np.cos(arc_a),
+                 h  + arc_r * _np.sin(arc_a),
+                 color="#ffd32a", lw=2, zorder=6)
+
+        # Label at midpoint of arc
+        mid_a = -theta / 2
+        lx = arc_r * _m.cos(mid_a) + 0.3
+        lz = h + arc_r * _m.sin(mid_a)
+        ax2.text(lx, lz, f"θ = {td}°\n(from horiz.)",
+                 color="#ffd32a", fontsize=8, va="center")
+
+        # Near / far distance ticks
+        for dist, col, va in [(near_y, "#ff9f43", "top"), (far_y, "#ff6b6b", "top")]:
+            ax2.plot([dist, dist], [0, -0.55], color=col, lw=1, ls=":", zorder=5)
+            ax2.text(dist, -0.65, f"{dist:.1f} m",
+                     color=col, fontsize=8, ha="center", va=va)
+
+        ax2.set_xlim(gy0 - 0.5, gy1 + 0.5)
+        ax2.set_ylim(-1.2, h + 1.8)
+        ax2.set_xlabel("Y — forward distance (m)", color="#888", fontsize=8)
+        ax2.set_ylabel("Z — height (m)",           color="#888", fontsize=8)
+        ax2.set_title("Side View  (camera profile)", color="white", fontsize=9)
+
+        fig.tight_layout(pad=1.5)
+
+        cv = FigureCanvasTkAgg(fig, master=win)
+        cv.draw()
+        cv.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    create_button(camf, "Preview 3D Geometry  [P]", _show_3d_preview)
+
     bf = create_label_frame(sb, "Actions")
 
     status_var = tk.StringVar(value="")
@@ -357,6 +586,8 @@ def run_calibration_window(video_path, calibrator):
             reset_all_points()
         elif k == "escape":
             use_default()
+        elif k == "p" and mode_var.get() == "auto":
+            _show_3d_preview()
 
     root.bind("<KeyPress>", on_key)
     root.protocol("WM_DELETE_WINDOW", lambda: (result.__setitem__(0,"default"), root.quit()))

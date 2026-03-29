@@ -214,15 +214,26 @@ class SpeedEstimator:
         h = self._hist[tid]
         if len(h) < MIN_HISTORY:
             return 0.0
-        
-        t0, x0, y0 = h[0];
-        t1, x1, y1 = h[-1]
-        dt = (t1-t0) / 1000.0
+
+        # Linear regression over all points in window: pos(t) = v*t + c
+        # Slope v (m/s) is more robust to tracker jitter than using only endpoints.
+        ts_s = np.array([e[0] for e in h], dtype=np.float64) / 1000.0
+        xs   = np.array([e[1] for e in h], dtype=np.float64)
+        ys   = np.array([e[2] for e in h], dtype=np.float64)
+        ts_s -= ts_s[0]                   # relative time, starting at 0
+
+        dt = ts_s[-1]
         if dt <= 0:
             return self._smo.get(tid, 0.0)
-        
-        spd = math.hypot(x1 - x0, y1 - y0) / dt * 3.6
-        s = SPEED_SMOOTH * spd + (1 - SPEED_SMOOTH) * self._smo.get(tid, spd)
+
+        # Fit vx, vy via least squares  [A] [vx] = [xs]
+        #                               [ ] [vy]   [ys]
+        A  = np.column_stack([ts_s, np.ones(len(ts_s))])
+        coeff, _, _, _ = np.linalg.lstsq(A, np.column_stack([xs, ys]), rcond=None)
+        vx, vy = float(coeff[0, 0]), float(coeff[0, 1])   # m/s
+
+        spd = math.hypot(vx, vy) * 3.6                    # km/h
+        s   = SPEED_SMOOTH * spd + (1 - SPEED_SMOOTH) * self._smo.get(tid, spd)
         self._smo[tid] = s
         return s
 
