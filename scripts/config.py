@@ -7,9 +7,9 @@ DETECT_EVERY = 3
 MAX_AGE = 10
 N_INIT = 5
 MAX_IOU_DIST = 0.7
-SPEED_WINDOW = 8
-MIN_HISTORY = 4
-SPEED_SMOOTH = 0.35
+SPEED_WINDOW = 12   # frames kept in regression window (larger = smoother but slower reaction)
+MIN_HISTORY  = 6    # minimum frames before showing speed
+SPEED_SMOOTH = 0.5  # EMA weight for new measurement (0=ignore new, 1=no smoothing)
 
 ROAD_WIDTH_M = 3.0
 ROAD_LENGTH_M = 7.0
