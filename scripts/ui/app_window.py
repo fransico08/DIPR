@@ -10,6 +10,7 @@ class AppWindow:
     def __init__(self, video_w, video_h,
                  on_reset, on_pause, on_quit,
                  on_screenshot, on_load_video, on_seek,
+                 on_scale, scale_factor,
                  total_frames, fps_src):
 
         self.video_w  = video_w
@@ -78,6 +79,20 @@ class AppWindow:
         ]:
             df = int(sec * fps_src)
             create_button_inline(ff, text=lbl, command=lambda d=df: self._seek_rel(d))
+
+# =============================================================================
+# Speed Scale
+# =============================================================================
+        xf = create_label_frame(sb, "Speed Scale Factor")
+        tk.Label(xf, text="Nhân tốc độ ×:", anchor="w",
+                 bg="#1a1a2e", fg="#ccc", font=("Consolas", 9)).pack(fill="x")
+        self._scale_v = tk.DoubleVar(value=scale_factor)
+        row = tk.Frame(xf, bg="#1a1a2e"); row.pack(fill="x", pady=(2, 4))
+        tk.Entry(row, textvariable=self._scale_v, width=8,
+                 bg="#2d2d44", fg="white", insertbackground="white",
+                 font=("Consolas", 10)).pack(side="left", padx=(0, 6))
+        create_button_inline(row, text="Áp dụng",
+                             command=lambda: on_scale(self._scale_v.get()))
 
 # =============================================================================
 # Buttons

@@ -28,7 +28,7 @@ from utils.ui_helpers import SIDEBAR_W
 from config import (MODEL_PATH, ROAD_WIDTH_M, ROAD_LENGTH_M, DEFAULT_IMG_PTS,
                     VEHICLE_CLASSES, CONF_THRESHOLD, IOU_THRESHOLD, YOLO_IMGSZ,
                     DETECT_EVERY, MAX_AGE, N_INIT, MAX_IOU_DIST,
-                    SPEED_WINDOW, MIN_HISTORY, SPEED_SMOOTH,
+                    SPEED_WINDOW, MIN_HISTORY, SPEED_SMOOTH, SPEED_SCALE,
                     DEFAULT_CAM_HEIGHT_M, DEFAULT_CAM_TILT_DEG,
                     DEFAULT_CAM_FOV_H_DEG, DEFAULT_ROAD_SLOPE_DEG,
                     AUTO_ROI_TOP, AUTO_ROI_BOT)
@@ -255,9 +255,12 @@ def make_tracker():
 #  MAIN PIPELINE
 # =============================================================
 
-def run_pipeline(video_path, calibrator):
+def run_pipeline(video_path, calibrator, speed_scale=None):
     global _cmap
     _cmap = {}
+
+    # Mutable container so inner callbacks can mutate it
+    _scale = [SPEED_SCALE if speed_scale is None else speed_scale]
 
     print(f"[INFO] Loading model: {MODEL_PATH}")
     model = YOLO(MODEL_PATH)
@@ -317,11 +320,19 @@ def run_pipeline(video_path, calibrator):
         reader.seek(fn)
         do_reset()
 
+    def do_scale(v):
+        try:
+            _scale[0] = max(0.01, float(v))
+            print(f"[INFO] Speed scale factor set to {_scale[0]:.3f}")
+        except ValueError:
+            pass
+
     app = AppWindow(
         video_w=disp_w, video_h=disp_h,
         on_reset=do_reset, on_pause=do_pause, on_quit=do_quit,
         on_screenshot=do_screenshot, on_load_video=do_load,
-        on_seek=do_seek,
+        on_seek=do_seek, on_scale=do_scale,
+        scale_factor=_scale[0],
         total_frames=reader.total_frames, fps_src=reader.fps_src,
     )
 
@@ -388,7 +399,7 @@ def run_pipeline(video_path, calibrator):
             tid = track.track_id
             cid = getattr(track, "det_class", 2)
             color = get_color(tid)
-            speed = speed_est.update(int(tid), ((l + r) // 2, b), ts_ms)
+            speed = speed_est.update(int(tid), ((l + r) // 2, b), ts_ms) * _scale[0]
             draw_track(frame, l, t, r, b, tid,
                        VEHICLE_CLASSES.get(cid,"vehicle"), speed, color)
 

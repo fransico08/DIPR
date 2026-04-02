@@ -10,6 +10,7 @@ MAX_IOU_DIST = 0.7
 SPEED_WINDOW = 12   # frames kept in regression window (larger = smoother but slower reaction)
 MIN_HISTORY  = 6    # minimum frames before showing speed
 SPEED_SMOOTH = 0.5  # EMA weight for new measurement (0=ignore new, 1=no smoothing)
+SPEED_SCALE  = 1.0  # correction multiplier: set >1 if measured speed < real speed
 
 ROAD_WIDTH_M = 3.0
 ROAD_LENGTH_M = 7.0
