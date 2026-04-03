@@ -3,6 +3,10 @@
 #  Run in Spyder: F5
 #  Tools > Preferences > Working Directory > project root
 #  Requirements: pip install ultralytics deep-sort-realtime opencv-python numpy Pillow
+#
+#  Architecture: ONE tk.Tk() lives in UnifiedWindow.
+#  The pipeline runs in a background thread so Tk is never blocked.
+#  Thread communication: UnifiedWindow.post_frame() / post_stats() queues.
 # =============================================================
 
 import cv2
@@ -10,271 +14,310 @@ import numpy as np
 import time
 import os
 import queue
+import threading
 from collections import deque
 
 from ultralytics import YOLO
-import tkinter as tk
-from tkinter import filedialog
 
 from config import (
     MODEL_PATH, CONF_THRESHOLD, IOU_THRESHOLD, YOLO_IMGSZ,
     DETECT_EVERY, VEHICLE_CLASSES,
-    SIDEBAR_W, FPS_BUF_SIZE, FPS_EPSILON,
+    FPS_BUF_SIZE, FPS_EPSILON,
 )
-from core.calibration    import HomographyCalibrator
+from core.calibration     import HomographyCalibrator
 from core.speed_estimator import SpeedEstimator
-from core.tracker        import make_tracker, compute_embeddings
-from ui.app_window       import AppWindow
-from ui.calibration_window import run_calibration_window
-from utils.frame_reader  import FrameReader
-from utils.drawing       import get_color, clear_color_cache, draw_track, draw_roi, draw_hud
-from utils.screen        import get_screen_size, fit_to_screen
+from core.tracker         import make_tracker, compute_embeddings
+from ui.unified_window    import UnifiedWindow
+from utils.frame_reader   import FrameReader
+from utils.drawing        import (get_color, clear_color_cache,
+                                  draw_track, draw_roi, draw_hud)
+from utils.screen         import get_screen_size, fit_to_screen
 
 
 # =============================================================
-#  MAIN PIPELINE
+#  PIPELINE  (runs in a daemon thread)
 # =============================================================
 
-def run_pipeline(video_path: str,
-                 calibrator: HomographyCalibrator) -> str:
+class Pipeline:
     """
-    Run the detection / tracking loop for one video.
-
-    Returns
-    -------
-    "load_new"  — user requested a new video
-    "quit"      — user closed the application
+    Wraps the YOLO + DeepSORT + speed-estimation loop.
+    Communicates with UnifiedWindow via post_frame() / post_stats().
+    Controlled via flags set by the UI callbacks.
     """
-    print(f"[INFO] Loading model: {MODEL_PATH}")
-    model = YOLO(MODEL_PATH)
 
-    try:
-        import torch
-        use_cuda = torch.cuda.is_available()
-    except Exception:
-        use_cuda = False
-    print(f"[INFO] CUDA: {use_cuda}")
+    def __init__(self, video_path: str, calibrator: HomographyCalibrator,
+                 window: UnifiedWindow):
+        self._video_path = video_path
+        self._cal        = calibrator
+        self._win        = window
 
-    # ── Video reader ──────────────────────────────────────────
-    reader = FrameReader(video_path)
-    scr_w, scr_h = get_screen_size()
-    disp_w, disp_h = fit_to_screen(
-        reader.width, reader.height,
-        scr_w - SIDEBAR_W, scr_h,
-    )
-    reader.start()
+        self._paused     = threading.Event()
+        self._stopped    = threading.Event()
+        self._reset_req  = threading.Event()
 
-    # ── Core components ───────────────────────────────────────
-    tracker   = make_tracker()
-    speed_est = SpeedEstimator(calibrator)
-    clear_color_cache()
+        self._scr_dir    = os.path.dirname(video_path)
+        self._cur_frame  = None   # for screenshot
 
-    # ── State ─────────────────────────────────────────────────
-    paused   = False
-    stopped  = False
-    load_new = False
-    frame_id = 0
-    dets:    list = []
-    fps_buf  = deque(maxlen=FPS_BUF_SIZE)
-    t_prev   = time.perf_counter()
-    scr_dir  = os.path.dirname(video_path)
-    cur_f    = [None]
-    cur_fno  = [0]
+        self._thread     = threading.Thread(target=self._run, daemon=True)
 
-    # ── Callbacks (pipeline → UI) ─────────────────────────────
-    def do_reset() -> None:
-        nonlocal tracker
-        tracker = make_tracker()
-        speed_est.reset()
-        clear_color_cache()
-        print("[INFO] Tracker reset.")
+    # ── Public control API (called from Tk thread) ─────────────
 
-    def do_pause() -> None:
-        nonlocal paused
-        paused = not paused
+    def start(self):  self._thread.start()
+    def stop(self):   self._stopped.set()
 
-    def do_quit() -> None:
-        nonlocal stopped
-        stopped = True
+    def pause(self):
+        if self._paused.is_set():
+            self._paused.clear()
+        else:
+            self._paused.set()
 
-    def do_screenshot() -> None:
-        if cur_f[0] is not None:
+    def reset(self):  self._reset_req.set()
+
+    def seek(self, frame_no: int):
+        self._seek_to = frame_no
+        self._reset_req.set()
+
+    def screenshot(self):
+        if self._cur_frame is not None:
             ts  = time.strftime("%Y%m%d_%H%M%S")
-            dst = os.path.join(scr_dir, f"screenshot_{ts}.png")
-            cv2.imwrite(dst, cur_f[0])
+            dst = os.path.join(self._scr_dir, f"screenshot_{ts}.png")
+            cv2.imwrite(dst, self._cur_frame)
             print(f"[INFO] Screenshot -> {dst}")
 
-    def do_load() -> None:
-        nonlocal load_new, stopped
-        load_new = True
-        stopped  = True
+    @property
+    def reader(self): return self._reader
 
-    def do_seek(frame_no: int) -> None:
-        reader.seek(frame_no)
-        do_reset()
+    # ── Pipeline loop ─────────────────────────────────────────
 
-    # ── Build window ──────────────────────────────────────────
-    app = AppWindow(
-        video_w      = disp_w,
-        video_h      = disp_h,
-        on_reset     = do_reset,
-        on_pause     = do_pause,
-        on_quit      = do_quit,
-        on_screenshot = do_screenshot,
-        on_load_video = do_load,
-        on_seek      = do_seek,
-        total_frames = reader.total_frames,
-        fps_src      = reader.fps_src,
-    )
-
-    def _on_key(event: tk.Event) -> None:
-        k = event.keysym.lower()
-        if   k == "space":  do_pause()
-        elif k == "r":      do_reset()
-        elif k == "s":      do_screenshot()
-        elif k == "l":      do_load()
-        elif k == "escape": app._hard_quit()
-
-    app.root.bind("<KeyPress>", _on_key)
-    app.root.focus_force()
-
-    # ── Main loop ─────────────────────────────────────────────
-    while not stopped:
-
-        # Pause: pump Tk events and wait for resume
-        if paused:
-            try:
-                app.update_stats(0, 0, calibrator.is_calibrated(),
-                                 True, False, cur_fno[0])
-            except Exception:
-                stopped = True
-            continue
-
-        # End of video: stay open, let user replay or load new
-        if reader.is_done():
-            print("[INFO] Video finished.")
-            paused = True
-            continue
-
+    def _run(self):
+        print(f"[INFO] Loading model: {MODEL_PATH}")
+        model = YOLO(MODEL_PATH)
         try:
-            frame, ts_ms, fno = reader.read()
-        except queue.Empty:
-            paused = True
-            continue
+            import torch
+            use_cuda = torch.cuda.is_available()
+        except Exception:
+            use_cuda = False
+        print(f"[INFO] CUDA: {use_cuda}")
 
-        cur_fno[0]  = fno
-        frame_id   += 1
-        frame       = cv2.resize(frame, (disp_w, disp_h))
+        self._reader = FrameReader(self._video_path)
+        scr_w, scr_h = get_screen_size()
+        from config import SIDEBAR_W
+        disp_w, disp_h = fit_to_screen(
+            self._reader.width, self._reader.height,
+            scr_w - SIDEBAR_W, scr_h)
 
-        # Detection (every DETECT_EVERY frames)
-        if frame_id % DETECT_EVERY == 0:
-            res  = model(frame, verbose=False,
-                         conf=CONF_THRESHOLD, iou=IOU_THRESHOLD,
-                         imgsz=YOLO_IMGSZ, half=use_cuda)[0]
-            dets = [
-                ([x1, y1, x2 - x1, y2 - y1], float(box.conf[0]), int(box.cls[0]))
-                for box in res.boxes
-                if int(box.cls[0]) in VEHICLE_CLASSES
-                for x1, y1, x2, y2 in [map(int, box.xyxy[0])]
-            ]
+        self._reader.start()
+        self._seek_to = None
 
-        # Tracking
-        embeds = compute_embeddings(frame, dets)
-        tracks = tracker.update_tracks(dets, embeds=embeds)
+        # Notify window of video size
+        self._win.init_screens(
+            self._reader.width, self._reader.height,
+            self._reader.total_frames, self._reader.fps_src)
 
-        # Per-track rendering
-        active = 0
-        for track in tracks:
-            if not track.is_confirmed():
+        tracker   = make_tracker()
+        speed_est = SpeedEstimator(self._cal)
+        clear_color_cache()
+
+        frame_id = 0
+        dets: list = []
+        fps_buf = deque(maxlen=FPS_BUF_SIZE)
+        t_prev  = time.perf_counter()
+
+        while not self._stopped.is_set():
+
+            # ── Pause ──────────────────────────────────────────
+            if self._paused.is_set():
+                self._win.post_stats(0, 0, self._cal.is_calibrated(),
+                                     True, False, 0)
+                time.sleep(0.05)
                 continue
-            active += 1
-            l, t, r, b = map(int, track.to_ltrb())
-            tid        = track.track_id
-            cid        = getattr(track, "det_class", 2)
-            color      = get_color(tid)
-            speed      = speed_est.update(int(tid), ((l + r) // 2, (t + b) // 2), ts_ms)
-            draw_track(frame, l, t, r, b, tid,
-                       VEHICLE_CLASSES.get(cid, "vehicle"), speed, color)
 
-        draw_roi(frame, calibrator.image_points)
+            # ── Reset / seek ───────────────────────────────────
+            if self._reset_req.is_set():
+                self._reset_req.clear()
+                tracker   = make_tracker()
+                speed_est = SpeedEstimator(self._cal)
+                clear_color_cache()
+                if self._seek_to is not None:
+                    self._reader.seek(self._seek_to)
+                    self._seek_to = None
+                frame_id = 0
+                dets = []
 
-        t_now = time.perf_counter()
-        fps_buf.append(1.0 / max(t_now - t_prev, FPS_EPSILON))
-        t_prev = t_now
-        fps    = float(np.mean(fps_buf))
+            # ── Read ───────────────────────────────────────────
+            if self._reader.is_done():
+                self._win.post_stats(0, 0, self._cal.is_calibrated(),
+                                     False, True, self._reader.total_frames)
+                time.sleep(0.05)
+                continue
 
-        draw_hud(frame, fps, active, calibrator.is_calibrated(), paused)
-        cur_f[0] = frame.copy()
+            try:
+                frame, ts_ms, fno = self._reader.read()
+            except queue.Empty:
+                continue
 
-        try:
-            app.update_frame(frame)
-            app.update_stats(fps, active, calibrator.is_calibrated(),
-                             paused, False, fno)
-        except Exception:
-            stopped = True
+            frame_id += 1
+            frame = cv2.resize(frame, (disp_w, disp_h))
 
-    # ── Cleanup ───────────────────────────────────────────────
-    reader.stop()
+            # ── Detection ──────────────────────────────────────
+            if frame_id % DETECT_EVERY == 0:
+                res  = model(frame, verbose=False,
+                             conf=CONF_THRESHOLD, iou=IOU_THRESHOLD,
+                             imgsz=YOLO_IMGSZ, half=use_cuda)[0]
+                dets = [
+                    ([x1, y1, x2-x1, y2-y1], float(box.conf[0]), int(box.cls[0]))
+                    for box in res.boxes
+                    if int(box.cls[0]) in VEHICLE_CLASSES
+                    for x1, y1, x2, y2 in [map(int, box.xyxy[0])]
+                ]
 
-    if load_new:
-        try:
-            app.destroy()
-        except Exception:
-            pass
-        return "load_new"
+            # ── Tracking ───────────────────────────────────────
+            embeds = compute_embeddings(frame, dets)
+            tracks = tracker.update_tracks(dets, embeds=embeds)
 
-    # Video finished — keep window open for replay / load
-    if app._alive:
-        try:
-            app.update_stats(0, 0, calibrator.is_calibrated(),
-                             False, True, cur_fno[0])
-            app.root.mainloop()
-        except Exception:
-            pass
+            active = 0
+            for track in tracks:
+                if not track.is_confirmed():
+                    continue
+                active += 1
+                l, t, r, b = map(int, track.to_ltrb())
+                tid  = track.track_id
+                cid  = getattr(track, "det_class", 2)
+                color = get_color(tid)
+                speed = speed_est.update(
+                    int(tid), ((l+r)//2, (t+b)//2), ts_ms)
+                draw_track(frame, l, t, r, b, tid,
+                           VEHICLE_CLASSES.get(cid, "vehicle"), speed, color)
 
-    print("[INFO] Done.")
-    return "quit"
+            draw_roi(frame, self._cal.image_points)
+
+            t_now = time.perf_counter()
+            fps_buf.append(1.0 / max(t_now - t_prev, FPS_EPSILON))
+            t_prev = t_now
+            fps = float(np.mean(fps_buf))
+
+            draw_hud(frame, fps, active, self._cal.is_calibrated(), False)
+
+            self._cur_frame = frame.copy()
+            self._win.post_frame(frame)
+            self._win.post_stats(fps, active, self._cal.is_calibrated(),
+                                 False, False, fno)
+
+        self._reader.stop()
+        print("[INFO] Pipeline stopped.")
 
 
 # =============================================================
-#  STARTUP
+#  APP CONTROLLER
+# =============================================================
+
+class AppController:
+    """
+    Owns the UnifiedWindow + Pipeline and wires them together.
+    Handles "load new video" by restarting the pipeline.
+    """
+
+    def __init__(self):
+        self._video_path = None
+        self._calibrator = None
+        self._pipeline   = None
+        self._window     = None
+
+    def run(self, first_video: str) -> None:
+        self._video_path = first_video
+        self._calibrator = HomographyCalibrator()
+
+        self._window = UnifiedWindow(
+            video_path  = self._video_path,
+            calibrator  = self._calibrator,
+            on_quit     = self._on_quit,
+            on_load_new = self._on_load_new,
+        )
+
+        # Start pipeline in background thread
+        self._start_pipeline()
+
+        # Wire UI callbacks
+        self._window.set_pipeline_callbacks(
+            on_pause      = self._pipeline.pause,
+            on_reset      = self._pipeline.reset,
+            on_screenshot = self._pipeline.screenshot,
+            on_seek       = self._pipeline.seek,
+        )
+
+        # Enter Tk event loop (blocks until window is closed)
+        self._window.run()
+
+    def _start_pipeline(self):
+        if self._pipeline:
+            self._pipeline.stop()
+
+        self._pipeline = Pipeline(
+            video_path = self._video_path,
+            calibrator = self._calibrator,
+            window     = self._window,
+        )
+        self._pipeline.start()
+
+    def _on_load_new(self, new_path: str):
+        """Called from Tk thread when user picks a new video."""
+        self._video_path = new_path
+        self._calibrator = HomographyCalibrator()
+        self._window._video_path  = new_path
+        self._window._calibrator  = self._calibrator
+        self._window._cal_status.set("New video loaded. Adjust params & Confirm.")
+
+        # Reload first frame for calibration preview
+        self._window._load_cal_first_frame()
+        self._window._render_cal(None)
+        self._window.show_calibration()
+
+        # Restart pipeline for new video
+        self._pipeline.stop()
+        self._pipeline = Pipeline(
+            video_path = self._video_path,
+            calibrator = self._calibrator,
+            window     = self._window,
+        )
+        self._window.set_pipeline_callbacks(
+            on_pause      = self._pipeline.pause,
+            on_reset      = self._pipeline.reset,
+            on_screenshot = self._pipeline.screenshot,
+            on_seek       = self._pipeline.seek,
+        )
+        self._pipeline.start()
+
+    def _on_quit(self):
+        if self._pipeline:
+            self._pipeline.stop()
+
+
+# =============================================================
+#  ENTRY POINT
 # =============================================================
 
 def _pick_video() -> str | None:
+    import tkinter as tk
+    from tkinter import filedialog
     root = tk.Tk()
     root.withdraw()
     path = filedialog.askopenfilename(
         title="Select video file",
-        filetypes=[
-            ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv"),
-            ("All files",   "*.*"),
-        ],
+        filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv"),
+                   ("All files", "*.*")],
     )
     root.destroy()
     return path or None
 
 
-def main() -> None:
+def main():
     video_path = _pick_video()
     if not video_path:
         print("[INFO] No video selected. Exiting.")
         return
 
-    calibrator = HomographyCalibrator()
-    run_calibration_window(video_path, calibrator)
-
-    while True:
-        result = run_pipeline(video_path, calibrator)
-        if result == "load_new":
-            video_path = _pick_video()
-            if not video_path:
-                break
-            calibrator = HomographyCalibrator()
-            run_calibration_window(video_path, calibrator)
-        else:
-            break
+    AppController().run(video_path)
 
 
-# =============================================================
 if __name__ == "__main__":
     main()

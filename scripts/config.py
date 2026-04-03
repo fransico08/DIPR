@@ -37,6 +37,7 @@ EMBED_DIM        = EMBED_BINS_H + EMBED_BINS_S + EMBED_BINS_V  # = 96
 VEHICLE_CLASSES  = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
 # ── Display ───────────────────────────────────────────────────
+TOPBAR_H         = 40
 SIDEBAR_W        = 280    # sidebar width in pixels
 SCREEN_MARGIN    = 80     # pixels kept free around the window
 CAL_SCREEN_MARGIN = 120    # margin used during calibration window
@@ -81,16 +82,9 @@ COLOR_HEADER_FG      = "#80d2ff"
 COLOR_FRAME_FG       = "#aaa"
 COLOR_LABEL_FG       = "#ccc"
 COLOR_ENTRY_BG       = "#2c3e50"
-COLOR_BTN_DEFAULT    = "#457b9d"
-COLOR_BTN_PAUSE      = "#2d6a4f"
-COLOR_BTN_RESET      = "#1d3557"
-COLOR_BTN_SCREENSHOT = "#457b9d"
-COLOR_BTN_REPLAY     = "#374151"
-COLOR_BTN_LOAD       = "#5c4033"
-COLOR_BTN_QUIT       = "#9b2226"
+COLOR_BTN_DEFAULT    = "#548eb3"
+COLOR_BTN_DANGER     = "#9b2226"
 COLOR_BTN_SEEK       = "#2c3e50"
-COLOR_BTN_CONFIRM_ON = "#1d9e75"
-COLOR_BTN_CONFIRM_OFF = "#444444"
 COLOR_STATUS_WARN    = "#f4a261"
 
 # ── Fonts ─────────────────────────────────────────────────────
