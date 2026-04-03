@@ -64,7 +64,7 @@ from utils.drawing import draw_roi_quad
 from utils.screen import get_screen_size, fit_to_screen
 
 # ── Poll interval for frame/stats queues ─────────────────────
-_POLL_MS = 30   # ~60 Hz
+_POLL_MS = 33   # ~30 Hz — reduced to lessen UI contention
 
 
 # =============================================================
@@ -112,7 +112,14 @@ def _inline_btn(parent, text, cmd):
              padx=UI_BTN_PACK_PADY, pady=UI_BTN_PACK_PADY)
     return btn
 
-def _seekbar(parent, var, total, on_change, owner):
+
+def _seekbar(parent, var, total, on_seek, owner):
+    """
+    FIX: Seekbar anti-jitter implementation.
+    - _user_dragging flag blocks pipeline updates to the var.
+    - Pipeline updates the var only when user is NOT dragging.
+    - Release triggers seek, then re-enables updates after short delay.
+    """
     bar = ttk.Scale(parent,
                     from_=0,
                     to=max(total - 1, 1),
@@ -121,38 +128,25 @@ def _seekbar(parent, var, total, on_change, owner):
 
     def _on_press(event):
         owner._user_dragging = True
-        owner._user_seeking = True
-    
-        owner._was_playing_before_seek = True
-        owner._cb_pause()
 
     def _on_move(v):
+        # Only do preview if dragging (don't fire on pipeline-driven updates)
         if owner._user_dragging:
             value = int(float(v))
-            var.set(value)
-    
             frame = owner._get_preview_frame(value)
             if frame is not None:
                 owner._show_frame(frame)
 
     def _on_release(event):
         value = int(var.get())
-    
-        on_change(value)
-    
-        def _finish():
-            owner._user_dragging = False
-            owner._user_seeking = False
-    
-            if owner._was_playing_before_seek:
-                owner._cb_pause()
-    
-        owner.root.after(120, _finish)
+        on_seek(value)
+        # Keep dragging=True for a short time so pipeline update doesn't
+        # immediately snap the seekbar back
+        owner.root.after(300, lambda: setattr(owner, "_user_dragging", False))
 
     bar.bind("<ButtonPress-1>", _on_press)
     bar.bind("<ButtonRelease-1>", _on_release)
     bar.configure(command=_on_move)
-
     bar.pack(fill="x", pady=UI_SEEKBAR_PADY)
     return bar
 
@@ -198,43 +192,44 @@ class UnifiedWindow:
     post_stats(fps,tracked,...) — push live stats
     set_callbacks(...)          — wire pipeline callbacks
     run()                       — enter mainloop (blocks until quit)
-    request_quit                — property: True when user pressed Quit
     """
 
     # ── Construction ──────────────────────────────────────────
 
     def __init__(self,
-                 video_path:  str,
-                 calibrator,
                  on_quit:     Callable,
                  on_load_new: Callable):
 
-        self._video_path  = video_path
-        self._calibrator  = calibrator
+        self._video_path  = None
+        self._calibrator  = None
         self._on_quit     = on_quit
         self._on_load_new = on_load_new
 
         # Pipeline callbacks (set later via set_pipeline_callbacks)
         self._cb_pause      = lambda: None
+        self._cb_resume     = lambda: None
         self._cb_reset      = lambda: None
         self._cb_screenshot = lambda: None
         self._cb_seek       = lambda fn: None
         self._total_frames  = 1
         self._fps_src       = 30.0
-        self._user_seeking = False
+
+        # FIX: single _user_dragging flag controls seekbar jitter
         self._user_dragging = False
-        self._was_playing_before_seek = False
-        self._preview_cap = None
+        self._preview_cap   = None
         self._preview_last_frame = None
+
+        # Screens built once video is loaded
+        self._screens_built = False
 
         # Thread-safe queues
         self._frame_q: queue.Queue = queue.Queue(maxsize=2)
         self._stats_q: queue.Queue = queue.Queue(maxsize=4)
 
-        # Compute display sizes
+        # Compute display sizes (placeholder until video loaded)
         scr_w, scr_h  = get_screen_size()
         self._disp_w, self._disp_h = fit_to_screen(
-            1920, 1080,          # will be overridden once we know video size
+            1920, 1080,
             scr_w - SIDEBAR_W, scr_h,
         )
         self._win_w = self._disp_w + SIDEBAR_W
@@ -264,6 +259,35 @@ class UnifiedWindow:
         # Debounce id for auto-preview
         self._preview_after_id = None
 
+        # Show welcome / no-video screen
+        self._build_welcome_screen()
+        self._show_welcome()
+
+    # ── Welcome screen (shown before any video is loaded) ─────
+
+    def _build_welcome_screen(self):
+        self._welcome_page = tk.Frame(self._container, bg="#0d1117")
+        self._welcome_page.grid(row=0, column=0, sticky="nsew")
+
+        tk.Label(
+            self._welcome_page,
+            text="Vehicle Speed Estimation",
+            bg="#0d1117", fg="#80d2ff",
+            font=("Consolas", 18, "bold"),
+        ).pack(pady=(80, 10))
+
+        tk.Label(
+            self._welcome_page,
+            text="Click  Open Video  in the toolbar to begin.",
+            bg="#0d1117", fg="#aaa",
+            font=("Consolas", 11),
+        ).pack(pady=6)
+
+    def _show_welcome(self):
+        self._welcome_page.tkraise()
+        self.root.geometry(f"700x400")
+        self.root.title("Vehicle Speed Estimation — No Video")
+
     # ── Two-phase init (call after pipeline knows video size) ─
 
     def init_screens(self, video_w: int, video_h: int,
@@ -284,30 +308,36 @@ class UnifiedWindow:
 
         # Load first frame for calibration preview
         self._load_cal_first_frame()
-        self._build_calibration_screen()
-        self._build_tracking_screen()
+
+        if not self._screens_built:
+            self._build_calibration_screen()
+            self._build_tracking_screen()
+            self._screens_built = True
+        else:
+            # Rebuild screens for new video
+            for widget in self._cal_page.winfo_children():
+                widget.destroy()
+            for widget in self._track_page.winfo_children():
+                widget.destroy()
+            self._build_calibration_screen()
+            self._build_tracking_screen()
 
         self.show_calibration()
-        
-        
+
         if self._preview_cap:
             self._preview_cap.release()
-        
         self._preview_cap = cv2.VideoCapture(self._video_path)
-        
+
     def _get_preview_frame(self, frame_no: int):
         if not self._preview_cap:
             return None
-    
         self._preview_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
         ret, frame = self._preview_cap.read()
-    
         if not ret:
             return None
-    
         frame = cv2.resize(frame, (self._disp_w, self._disp_h))
         return frame
-        
+
     def _build_base_screen(self, parent):
         parent.configure(bg="black")
 
@@ -323,14 +353,13 @@ class UnifiedWindow:
         canvas.grid(row=0, column=0, sticky="nsew")
 
         sidebar = self._build_scrollable_sidebar(parent)
-
         return canvas, sidebar
-    
+
     def _build_scrollable_sidebar(self, parent):
         outer = tk.Frame(parent, bg=COLOR_SIDEBAR_BG, width=SIDEBAR_W)
         outer.grid(row=0, column=1, sticky="nsew")
         outer.grid_propagate(False)
-        
+
         SCROLLBAR_W = 15
         canvas = tk.Canvas(
             outer,
@@ -339,31 +368,31 @@ class UnifiedWindow:
             width=SIDEBAR_W - SCROLLBAR_W
         )
         canvas.pack(side="left", fill="both")
-    
+
         scrollbar = tk.Scrollbar(outer, orient="vertical",
                                  command=canvas.yview)
         scrollbar.pack(side="right", fill="y")
-    
+
         canvas.configure(yscrollcommand=scrollbar.set)
-    
+
         inner = tk.Frame(canvas, bg=COLOR_SIDEBAR_BG)
         window = canvas.create_window((0, 0), window=inner, anchor="nw")
-    
+
         def _on_configure(event):
             canvas.configure(scrollregion=canvas.bbox("all"))
             canvas.itemconfig(window, width=canvas.winfo_width())
-    
+
         inner.bind("<Configure>", _on_configure)
-    
+
         canvas.bind("<MouseWheel>",
                     lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-    
+
         return inner
 
     def _build_topbar(self):
         bar = tk.Frame(self.root, bg="#1f2a36", height=TOPBAR_H)
         bar.pack(side="top", fill="x")
-    
+
         def btn(text, cmd, bg=COLOR_BTN_DEFAULT):
             return tk.Button(
                 bar,
@@ -376,15 +405,12 @@ class UnifiedWindow:
                 pady=6,
                 cursor="hand2"
             )
-    
-        btn("Open", self._open_video, COLOR_BTN_DEFAULT).pack(side="left", padx=6, pady=4)
-        btn("Calibration", self.show_calibration, COLOR_BTN_DEFAULT).pack(side="left", padx=6)
-        btn("Tracking", self.show_tracking, COLOR_BTN_DEFAULT).pack(side="left", padx=6)
-    
-        # spacer (đẩy nút sang phải nếu cần)
-        # tk.Label(bar, bg="#1f2a36").pack(side="left", expand=True)
+
+        btn("Open Video", self._open_video, COLOR_BTN_DEFAULT).pack(side="left", padx=6, pady=4)
+        btn("Calibration", self._go_calibration, COLOR_BTN_DEFAULT).pack(side="left", padx=6)
+        btn("Tracking", self._go_tracking, COLOR_BTN_DEFAULT).pack(side="left", padx=6)
         btn("Quit", self._quit, COLOR_BTN_DANGER).pack(side="left", padx=6)
-    
+
     # ─────────────────────────────────────────────────────────
     #  SCREEN: CALIBRATION
     # ─────────────────────────────────────────────────────────
@@ -392,14 +418,16 @@ class UnifiedWindow:
     def _load_cal_first_frame(self):
         cap = cv2.VideoCapture(self._video_path)
         ret, raw = cap.read()
+        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
-        self._cal_orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or (raw.shape[1] if ret else 1920)
-        self._cal_orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or (raw.shape[0] if ret else 1080)
+        self._cal_orig_w = orig_w or (raw.shape[1] if ret else 1920)
+        self._cal_orig_h = orig_h or (raw.shape[0] if ret else 1080)
         if ret:
             self._cal_first_frame = cv2.resize(raw, (self._disp_w, self._disp_h))
         else:
             self._cal_first_frame = np.zeros((self._disp_h, self._disp_w, 3), np.uint8)
-            
+
     def _build_calibration_screen(self):
         pg = self._cal_page
         self._cal_canvas, sb_outer = self._build_base_screen(self._cal_page)
@@ -491,6 +519,12 @@ class UnifiedWindow:
         else:
             self._render_cal(None)
 
+    def _schedule_preview(self):
+        """Debounced preview: only fires 400 ms after last change."""
+        if self._preview_after_id:
+            self.root.after_cancel(self._preview_after_id)
+        self._preview_after_id = self.root.after(400, self._do_preview)
+
     def _get_params(self):
         try:
             p = {
@@ -513,6 +547,8 @@ class UnifiedWindow:
             return None
 
     def _do_preview(self):
+        if not self._video_path:
+            return
         p = self._get_params()
         if p is None:
             return
@@ -528,7 +564,7 @@ class UnifiedWindow:
         import PIL.Image, PIL.ImageTk
         f = self._cal_first_frame.copy()
         if pts and len(pts) == 4:
-            draw_roi_quad(f, pts)
+            _draw_roi_enhanced(f, pts)
         rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
         self._cal_photo = PIL.ImageTk.PhotoImage(PIL.Image.fromarray(rgb))
         self._cal_canvas.create_image(0, 0, anchor="nw", image=self._cal_photo)
@@ -539,24 +575,21 @@ class UnifiedWindow:
             return
         _save_config(self._video_path, p)
         self._cal_status.set(f"Saved → {os.path.basename(_cal_path(self._video_path))}")
-        
+
     def _cal_reset_to_saved(self):
         saved = _load_config(self._video_path)
         if not saved:
             self._cal_status.set("⚠ No saved config found")
             return
-    
-        # restore values
+
         self._v_height.set(str(saved.get("cam_height_m", CAM_HEIGHT_M_DEFAULT)))
         self._v_tilt.set(str(saved.get("cam_tilt_deg", CAM_TILT_DEG_DEFAULT)))
         self._v_fov.set(str(saved.get("fov_h_deg", CAM_FOV_H_DEG_DEFAULT)))
         self._v_slope.set(str(saved.get("road_slope_deg", CAM_SLOPE_DEG_DEFAULT)))
         self._v_width.set(str(saved.get("road_width_m", CAM_ROAD_WIDTH_DEFAULT)))
         self._v_depth.set(str(saved.get("road_depth_m", CAM_ROAD_DEPTH_DEFAULT)))
-    
-        # trigger preview update
+
         self._do_preview()
-    
         self._cal_status.set("Restored saved config")
 
     def _cal_confirm(self):
@@ -664,29 +697,39 @@ class UnifiedWindow:
 
     def _poll(self):
         """Called by Tk every _POLL_MS ms to drain queues."""
-        try:
-            frame = self._frame_q.get_nowait()
-
-            if not self._user_seeking:
-                self._show_frame(frame)
-        except queue.Empty:
-            pass
+        # FIX: only render frame when on tracking screen
+        if self._track_page.winfo_ismapped():
+            try:
+                frame = self._frame_q.get_nowait()
+                if not self._user_dragging:
+                    self._show_frame(frame)
+            except queue.Empty:
+                pass
+        else:
+            # Drain queue to avoid memory buildup when on calibration screen
+            try:
+                while True:
+                    self._frame_q.get_nowait()
+            except queue.Empty:
+                pass
 
         try:
             fps, tracked, calibrated, paused, stopped, fno = self._stats_q.get_nowait()
-            self._t_fps.set(f"FPS: {fps:.1f}")
-            self._t_tracked.set(f"Tracked: {tracked}")
-            self._t_cal.set(f"Homography: {'Calibrated' if calibrated else 'Default'}")
-            if stopped:
-                self._t_status.set("Status: Finished")
-            elif paused:
-                self._t_status.set("Status: PAUSED")
-            else:
-                self._t_status.set("Status: Running")
-                
-            if not self._user_seeking and not paused:
-                self._seek_v.set(fno)
-            self._t_pos.set(f"Frame: {fno} / {self._total_frames}")
+            if hasattr(self, "_t_fps"):
+                self._t_fps.set(f"FPS: {fps:.1f}")
+                self._t_tracked.set(f"Tracked: {tracked}")
+                self._t_cal.set(f"Homography: {'Calibrated' if calibrated else 'Default'}")
+                if stopped:
+                    self._t_status.set("Status: Finished")
+                elif paused:
+                    self._t_status.set("Status: PAUSED")
+                else:
+                    self._t_status.set("Status: Running")
+
+                # FIX: Only update seekbar var when not dragging
+                if not self._user_dragging:
+                    self._seek_v.set(fno)
+                self._t_pos.set(f"Frame: {fno} / {self._total_frames}")
         except queue.Empty:
             pass
 
@@ -701,6 +744,18 @@ class UnifiedWindow:
 
     # ── Screen switching ──────────────────────────────────────
 
+    def _go_calibration(self):
+        if not self._video_path:
+            return
+        # Pause pipeline when going to calibration
+        self._cb_pause()
+        self.show_calibration()
+
+    def _go_tracking(self):
+        if not self._video_path:
+            return
+        self.show_tracking()
+
     def show_calibration(self):
         self._cal_page.tkraise()
         self.root.title("Vehicle Speed Estimation — Calibration")
@@ -708,25 +763,25 @@ class UnifiedWindow:
     def show_tracking(self):
         self._track_page.tkraise()
         self.root.title("Vehicle Speed Estimation — Tracking")
+        # FIX: resume pipeline when switching to tracking
+        self._cb_resume()
 
     # ── Helpers ───────────────────────────────────────────────
-        
+
     def _seek_rel(self, delta):
         target = max(0, min(self._total_frames - 1,
                             self._seek_v.get() + delta))
-        self._user_seeking = True
+        self._user_dragging = True
         self._seek_v.set(target)
         self._cb_seek(target)
-    
-        self.root.after(200, lambda: setattr(self, "_user_seeking", False))
-        
+        self.root.after(300, lambda: setattr(self, "_user_dragging", False))
+
     def _replay(self):
-        self._user_seeking = True
-        self._cb_reset() 
+        """FIX: properly reset pipeline so video replays from start."""
+        self._user_dragging = True
         self._seek_v.set(0)
-        self._cb_seek(0)
-    
-        self.root.after(200, lambda: setattr(self, "_user_seeking", False))
+        self._cb_reset()  # this clears pause and resets to frame 0
+        self.root.after(400, lambda: setattr(self, "_user_dragging", False))
 
     def _open_video(self):
         path = filedialog.askopenfilename(
@@ -735,6 +790,7 @@ class UnifiedWindow:
                        ("All files", "*.*")],
         )
         if path:
+            self._video_path = path
             self._on_load_new(path)
 
     def _quit(self):
@@ -751,10 +807,12 @@ class UnifiedWindow:
 
     def set_pipeline_callbacks(self,
                                on_pause:      Callable,
+                               on_resume:     Callable,
                                on_reset:      Callable,
                                on_screenshot: Callable,
                                on_seek:       Callable) -> None:
         self._cb_pause      = on_pause
+        self._cb_resume     = on_resume
         self._cb_reset      = on_reset
         self._cb_screenshot = on_screenshot
         self._cb_seek       = on_seek
@@ -768,3 +826,123 @@ class UnifiedWindow:
     @property
     def is_alive(self):
         return self._alive
+
+
+# =============================================================
+#  ENHANCED ROI DRAWING  (gradient + depth cues)
+# =============================================================
+
+def _draw_roi_enhanced(frame: np.ndarray, pts: list) -> None:
+    """
+    Draw the calibration ROI with visual depth/perspective cues:
+    - Gradient fill: near=warm (amber), far=cool (cyan), semi-transparent
+    - Corner dots: larger near, smaller far
+    - Edge lines: thicker near, thinner far
+    - Labels with background chips
+    - Perspective grid lines inside the zone
+    """
+    if not pts or len(pts) < 4:
+        return
+
+    tl, tr, bl, br = [tuple(map(int, p)) for p in pts]
+
+    # ── Gradient fill overlay ──────────────────────────────────
+    overlay = frame.copy()
+
+    # Build a filled polygon mask
+    poly = np.array([tl, tr, br, bl], dtype=np.int32)
+
+    # Near zone (bottom) = warm amber, far zone (top) = cool cyan
+    # We draw horizontal gradient scanlines inside the polygon
+    y_min = min(tl[1], tr[1])
+    y_max = max(bl[1], br[1])
+    h_range = max(y_max - y_min, 1)
+
+    # Colour stops: far=cyan (0,220,255), near=amber (255,180,0)
+    far_color  = np.array([0,   220, 255], dtype=np.float32)   # BGR cyan
+    near_color = np.array([255, 160,   0], dtype=np.float32)   # BGR amber
+
+    for y in range(y_min, y_max + 1):
+        t_val = (y - y_min) / h_range              # 0=far, 1=near
+        color = (far_color * (1 - t_val) + near_color * t_val).astype(int)
+
+        # Interpolate left and right edge at this y
+        # Left edge: tl→bl,  Right edge: tr→br
+        def interp_x(p1, p2, y_val):
+            if p2[1] == p1[1]:
+                return p1[0]
+            frac = (y_val - p1[1]) / (p2[1] - p1[1])
+            return int(p1[0] + frac * (p2[0] - p1[0]))
+
+        x_left  = interp_x(tl, bl, y)
+        x_right = interp_x(tr, br, y)
+        if x_left > x_right:
+            x_left, x_right = x_right, x_left
+        cv2.line(overlay, (x_left, y), (x_right, y),
+                 (int(color[0]), int(color[1]), int(color[2])), 1)
+
+    cv2.addWeighted(overlay, 0.28, frame, 0.72, 0, frame)
+
+    # ── Perspective grid lines inside zone ────────────────────
+    # 2 vertical + 2 horizontal lines fading with depth
+    grid_alpha = frame.copy()
+    for frac in (0.33, 0.67):
+        # Vertical: interpolate between (tl→tr) and (bl→br)
+        top_x    = int(tl[0] + frac * (tr[0] - tl[0]))
+        top_y    = int(tl[1] + frac * (tr[1] - tl[1]))
+        bot_x    = int(bl[0] + frac * (br[0] - bl[0]))
+        bot_y    = int(bl[1] + frac * (br[1] - bl[1]))
+        cv2.line(grid_alpha, (top_x, top_y), (bot_x, bot_y), (180, 255, 200), 1, cv2.LINE_AA)
+
+        # Horizontal: interpolate between (tl→bl) and (tr→br)
+        left_x  = int(tl[0] + frac * (bl[0] - tl[0]))
+        left_y  = int(tl[1] + frac * (bl[1] - tl[1]))
+        right_x = int(tr[0] + frac * (br[0] - tr[0]))
+        right_y = int(tr[1] + frac * (br[1] - tr[1]))
+        cv2.line(grid_alpha, (left_x, left_y), (right_x, right_y), (180, 255, 200), 1, cv2.LINE_AA)
+
+    cv2.addWeighted(grid_alpha, 0.45, frame, 0.55, 0, frame)
+
+    # ── Edge lines: near=thick amber, far=thin cyan ───────────
+    # Far edge (top): tl→tr — thin cyan
+    cv2.line(frame, tl, tr, (0, 220, 255), 1, cv2.LINE_AA)
+    # Near edge (bottom): bl→br — thick amber
+    cv2.line(frame, bl, br, (255, 160, 0), 3, cv2.LINE_AA)
+    # Left side: tl→bl — gradient (just use mid color)
+    cv2.line(frame, tl, bl, (100, 200, 180), 2, cv2.LINE_AA)
+    # Right side: tr→br
+    cv2.line(frame, tr, br, (100, 200, 180), 2, cv2.LINE_AA)
+
+    # ── Corner dots: far=small cool, near=large warm ──────────
+    corner_cfg = [
+        (tl, (0,   220, 255), 5,  "TL", "FAR"),
+        (tr, (0,   220, 255), 5,  "TR", "FAR"),
+        (bl, (255, 160,   0), 9,  "BL", "NEAR"),
+        (br, (255, 160,   0), 9,  "BR", "NEAR"),
+    ]
+    for pt, col, radius, label, hint in corner_cfg:
+        # White ring
+        cv2.circle(frame, pt, radius + 2, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.circle(frame, pt, radius,     col,             -1, cv2.LINE_AA)
+
+        # Label chip background
+        lx = pt[0] + 10
+        ly = pt[1] - 10
+        label_text = f"{label} ({hint})"
+        (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        cv2.rectangle(frame, (lx - 2, ly - th - 3), (lx + tw + 2, ly + 3),
+                      (20, 20, 20), -1)
+        cv2.putText(frame, label_text, (lx, ly),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, 1, cv2.LINE_AA)
+
+    # ── "ROI" badge at center of far edge ─────────────────────
+    cx = (tl[0] + tr[0]) // 2
+    cy = (tl[1] + tr[1]) // 2 - 14
+    badge = "CALIBRATION ZONE"
+    (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_DUPLEX, 0.45, 1)
+    cv2.rectangle(frame, (cx - bw//2 - 5, cy - bh - 4),
+                  (cx + bw//2 + 5, cy + 4), (10, 10, 30), -1)
+    cv2.rectangle(frame, (cx - bw//2 - 5, cy - bh - 4),
+                  (cx + bw//2 + 5, cy + 4), (0, 220, 255), 1, cv2.LINE_AA)
+    cv2.putText(frame, badge, (cx - bw//2, cy),
+                cv2.FONT_HERSHEY_DUPLEX, 0.45, (0, 220, 255), 1, cv2.LINE_AA)

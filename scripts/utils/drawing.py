@@ -36,10 +36,35 @@ def clear_color_cache() -> None:
 
 def draw_track(frame: np.ndarray,
                l: int, t: int, r: int, b: int,
-               tid, cls_name: str, speed: float,
-               color: tuple) -> None:
+               tid, cls_name: str, speed,
+               color: tuple,
+               in_zone: bool = True) -> None:
+    """
+    Draw a tracked vehicle bounding box + label.
+
+    in_zone=True  → full-color box + speed label
+    in_zone=False → dim/grey box only, no speed label (out-of-calibration)
+    speed=None    → box with "---" label (zone but no speed yet)
+    """
+    if not in_zone:
+        # Draw dimmed grey box for out-of-zone vehicles
+        dim_color = (80, 80, 80)
+        cv2.rectangle(frame, (l, t), (r, b), dim_color, 1)
+        # Small label, no speed
+        label = f"ID{int(tid)}"
+        cv2.putText(frame, label, (l + 2, t - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                    (120, 120, 120), 1, cv2.LINE_AA)
+        return
+
     cv2.rectangle(frame, (l, t), (r, b), color, 2)
-    label = f"ID{int(tid)} {cls_name} {speed:.1f}km/h"
+
+    if speed is None:
+        speed_str = "---"
+    else:
+        speed_str = f"{speed:.1f}km/h"
+
+    label = f"ID{int(tid)} {cls_name} {speed_str}"
     (tw, th), baseline = cv2.getTextSize(
         label, cv2.FONT_HERSHEY_DUPLEX, TRACK_LABEL_FONT_SCALE, 1)
     p = TRACK_LABEL_PAD
@@ -54,6 +79,15 @@ def draw_track(frame: np.ndarray,
     cx, cy = (l + r) // 2, b
     cv2.circle(frame, (cx, cy), TRACK_DOT_RADIUS, color, -1)
     cv2.circle(frame, (cx, cy), TRACK_DOT_RADIUS, TRACK_DOT_BORDER, 1)
+
+    # Draw vehicle center cross
+    cx_box = (l + r) // 2
+    cy_box = (t + b) // 2
+    cross_size = 6
+    cv2.line(frame, (cx_box - cross_size, cy_box), (cx_box + cross_size, cy_box),
+             (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.line(frame, (cx_box, cy_box - cross_size), (cx_box, cy_box + cross_size),
+             (255, 255, 255), 1, cv2.LINE_AA)
 
 
 # ── Shared ROI drawing — used by BOTH live HUD and calibration preview ────────
@@ -87,10 +121,40 @@ def draw_roi_quad(frame: np.ndarray, pts: list,
 
 
 def draw_roi(frame: np.ndarray, pts: list | None) -> None:
-    """Live HUD version: same quad style as calibration preview."""
+    """
+    Live HUD version: enhanced ROI with depth/perspective gradient cues.
+    """
     if not pts or len(pts) < 4:
         return
-    draw_roi_quad(frame, pts)
+    _draw_roi_live(frame, pts)
+
+
+def _draw_roi_live(frame: np.ndarray, pts: list) -> None:
+    """
+    Live tracking overlay of ROI — lighter version of the calibration enhanced draw.
+    Semi-transparent fill + depth-coded edges.
+    """
+    tl, tr, bl, br = [tuple(map(int, p)) for p in pts]
+
+    # Semi-transparent fill
+    overlay = frame.copy()
+    poly = np.array([tl, tr, br, bl], dtype=np.int32)
+    cv2.fillPoly(overlay, [poly], (0, 60, 40))
+    cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
+
+    # Far edge: thin cyan
+    cv2.line(frame, tl, tr, (0, 220, 255), 1, cv2.LINE_AA)
+    # Near edge: thick amber
+    cv2.line(frame, bl, br, (255, 160, 0), 3, cv2.LINE_AA)
+    # Sides
+    cv2.line(frame, tl, bl, (80, 200, 160), 2, cv2.LINE_AA)
+    cv2.line(frame, tr, br, (80, 200, 160), 2, cv2.LINE_AA)
+
+    # Corner dots
+    for pt, col, r in [(tl, (0, 220, 255), 4), (tr, (0, 220, 255), 4),
+                        (bl, (255, 160, 0), 7), (br, (255, 160, 0), 7)]:
+        cv2.circle(frame, pt, r + 1, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.circle(frame, pt, r,     col,             -1, cv2.LINE_AA)
 
 
 def draw_hud(frame: np.ndarray,
