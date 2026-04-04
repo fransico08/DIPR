@@ -1,12 +1,12 @@
 import cv2
 import os
-
 import tkinter as tk
 from utils.screen import get_screen_size, fit_to_screen
 from config import (ROAD_WIDTH_M, ROAD_LENGTH_M,
                     DEFAULT_CAM_HEIGHT_M, DEFAULT_CAM_TILT_DEG,
-                    DEFAULT_CAM_FOV_H_DEG, DEFAULT_ROAD_SLOPE_DEG)
-from utils.ui_helpers import SIDEBAR_W, COLOR_SIDEBAR_BG, create_label_title, create_label_frame, create_label, create_entry, create_button
+                    DEFAULT_CAM_FOV_H_DEG, DEFAULT_ROAD_SLOPE_DEG,
+                    AUTO_ROI_TOP, AUTO_ROI_BOT, AUTO_ROI_LEFT, AUTO_ROI_RIGHT)
+from utils.ui_helpers import SIDEBAR_W, COLOR_SIDEBAR_BG, create_label_title, create_label_frame, create_label, create_entry, create_button, create_param_row
 
 NEEDED_POINT = 4
 
@@ -59,8 +59,30 @@ def run_calibration_window(video_path, calibrator):
                             scr_w - SIDEBAR_W, scr_h, margin=80)
     display_frame = cv2.resize(raw_frame, (cw, ch))
 
+    # Per-video camera params TXT  (same folder, same stem + _cam.txt)
+    # Format: one "key=value" per line, lines starting with # are comments.
+    stem      = os.path.splitext(os.path.basename(video_path))[0]
+    txt_path  = os.path.join(os.path.dirname(video_path), f"{stem}_cam.txt")
+    cam_json  = {}   # reuse same dict name for compatibility
+    if os.path.exists(txt_path):
+        try:
+            with open(txt_path, "r", encoding="utf-8") as ft:
+                for line in ft:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    k = k.strip(); v = v.strip()
+                    try:    cam_json[k] = float(v)
+                    except ValueError: cam_json[k] = v   # keep strings (e.g. mode)
+            print(f"[Calibration] Loaded camera params: {txt_path}")
+        except Exception as e:
+            print(f"[Calibration] Could not load {txt_path}: {e}")
+
     # Check for existing calibration file
-    cal_path = os.path.join(os.path.dirname(video_path), "calibration.npz")
+    cal_path = os.path.join(os.path.dirname(video_path), f"{stem}_cal.npz")
+    if not os.path.exists(cal_path):                         # fallback to old name
+        cal_path = os.path.join(os.path.dirname(video_path), "calibration.npz")
     has_saved = os.path.exists(cal_path)
 
     clicked = []
@@ -71,30 +93,56 @@ def run_calibration_window(video_path, calibrator):
     # ── Build Tk window ───────────────────────────────────────
     root = tk.Tk()
     root.title("Calibration")
-    root.resizable(False, False)
+    root.resizable(True, True)
     root.geometry(f"{cw + SIDEBAR_W}x{ch}")
+    root.rowconfigure(0, weight=1)
+    root.columnconfigure(0, weight=1)
 
 # =============================================================================
 # Canvas
 # =============================================================================
     canvas = tk.Canvas(root, width=cw, height=ch,
                        bg="black", highlightthickness=0, cursor="crosshair")
-    canvas.grid(row=0, column=0)
+    canvas.grid(row=0, column=0, sticky="nw")
     photo_ref = [None]
+    preview_roi_pts = [None]   # auto-mode: 4 image corners [TL, TR, BL, BR]
 
     def render_frame():
         f = display_frame.copy()
-        # Draw existing points
+
+        # ── Auto mode: overlay computed calibration trapezoid live ─────────
+        try:
+            if mode_var.get() == "auto" and preview_roi_pts[0] is not None:
+                pts = preview_roi_pts[0]             # [TL, TR, BL, BR]
+                outline = [pts[0], pts[1], pts[3], pts[2]]   # TL→TR→BR→BL
+                for k in range(4):
+                    cv2.line(f, tuple(outline[k]), tuple(outline[(k+1) % 4]),
+                             LINE_COLOR, LINE_THICKNESS, cv2.LINE_AA)
+                for pt in pts:
+                    cv2.circle(f, tuple(pt), POINT_RADIUS, POINT_COLOR, -1)
+                for pt, lbl in zip(pts, ["TL", "TR", "BL", "BR"]):
+                    cv2.putText(f, lbl, (pt[0]+TEXT_OFFSET_X, pt[1]+TEXT_OFFSET_Y),
+                                TEXT_FONT, TEXT_SCALE_STATUS, POINT_COLOR, TEXT_THICKNESS_STATUS)
+        except NameError:
+            pass   # mode_var not yet in scope on very first call
+
+        # ── Manual mode: draw clicked points with correct outline ───────────
         for i, pt in enumerate(clicked):
             cv2.circle(f, (pt[0],pt[1]), POINT_RADIUS, POINT_COLOR, -1)
             cv2.putText(f, str(i+1), (pt[0]+TEXT_OFFSET_X, pt[1]+TEXT_OFFSET_Y),
                         TEXT_FONT, TEXT_SCALE_MAIN, POINT_COLOR, TEXT_THICKNESS_MAIN)
-            if i > 0:
-                cv2.line(f, tuple(clicked[i-1]), tuple(pt), LINE_COLOR, LINE_THICKNESS)
-                
+
         if len(clicked) == NEEDED_POINT:
-            cv2.line(f, tuple(clicked[3]), tuple(clicked[0]), LINE_COLOR, LINE_THICKNESS)
-        # Status text top-left
+            # Correct trapezoid outline: TL→TR→BR→BL→TL (no crossing diagonals)
+            order = [0, 1, 3, 2]
+            for k in range(4):
+                cv2.line(f, tuple(clicked[order[k]]), tuple(clicked[order[(k+1) % 4]]),
+                         LINE_COLOR, LINE_THICKNESS, cv2.LINE_AA)
+        elif len(clicked) > 1:
+            for k in range(1, len(clicked)):
+                cv2.line(f, tuple(clicked[k-1]), tuple(clicked[k]),
+                         LINE_COLOR, LINE_THICKNESS)
+
         status = f"Points: {len(clicked)} / {NEEDED_POINT}"
         cv2.putText(f, status, (STATUS_POS_X, ch-STATUS_MARGIN_BOTTOM),
                     TEXT_FONT, TEXT_SCALE_STATUS, STATUS_TEXT_COLOR, TEXT_THICKNESS_STATUS, cv2.LINE_AA)
@@ -117,11 +165,27 @@ def run_calibration_window(video_path, calibrator):
     canvas.bind("<Button-3>", on_canvas_rclick)
 
 # =============================================================================
-# Sidebar
+# Sidebar (scrollable)
 # =============================================================================
-    sb = tk.Frame(root, bg=COLOR_SIDEBAR_BG, width=SIDEBAR_W)
-    sb.grid(row=0, column=1, sticky="nsew")
-    sb.grid_propagate(False)
+    sb_outer = tk.Frame(root, bg=COLOR_SIDEBAR_BG, width=SIDEBAR_W)
+    sb_outer.grid(row=0, column=1, sticky="nsew")
+    sb_outer.grid_propagate(False)
+
+    _sb_scroll = tk.Scrollbar(sb_outer, orient="vertical")
+    _sb_scroll.pack(side="right", fill="y")
+    _sb_cv = tk.Canvas(sb_outer, bg=COLOR_SIDEBAR_BG,
+                       yscrollcommand=_sb_scroll.set, highlightthickness=0)
+    _sb_cv.pack(side="left", fill="both", expand=True)
+    _sb_scroll.config(command=_sb_cv.yview)
+    sb = tk.Frame(_sb_cv, bg=COLOR_SIDEBAR_BG)
+    _sb_win = _sb_cv.create_window(0, 0, anchor="nw", window=sb,
+                                   width=SIDEBAR_W - 18)
+    sb.bind("<Configure>",
+            lambda e: _sb_cv.configure(scrollregion=_sb_cv.bbox("all")))
+    _sb_cv.bind("<MouseWheel>",
+                lambda e: _sb_cv.yview_scroll(int(-1*(e.delta/120)), "units"))
+    sb.bind("<MouseWheel>",
+            lambda e: _sb_cv.yview_scroll(int(-1*(e.delta/120)), "units"))
 
     create_label_title(sb, "CALIBRATION")
 
@@ -167,6 +231,10 @@ def run_calibration_window(video_path, calibrator):
                 td = float(cam_tilt_var.get())
                 fv = float(cam_fov_var.get())
                 sl = float(road_slope_var.get())
+                rt = float(roi_top_var.get())
+                rb = float(roi_bot_var.get())
+                sw = float(scale_w_var.get())
+                sl2= float(scale_l_var.get())
             except Exception:
                 status_var.set("Invalid camera parameter value.")
                 return
@@ -212,7 +280,8 @@ def run_calibration_window(video_path, calibrator):
         
 
 # ── Calibration mode toggle ────────────────────────────────────
-    mode_var = tk.StringVar(value="manual")
+    _init_mode = cam_json.get("mode", "manual")
+    mode_var   = tk.StringVar(value=_init_mode)
 
     def _refresh_mode(*_):
         if mode_var.get() == "auto":
@@ -245,70 +314,140 @@ def run_calibration_window(video_path, calibrator):
     camf = create_label_frame(sb, "Camera Parameters")
     camf.pack_forget()   # hidden by default; shown when mode == "auto"
 
-    create_label(camf, "Height above road (m):")
-    cam_h_var = tk.DoubleVar(value=DEFAULT_CAM_HEIGHT_M)
-    create_entry(camf, cam_h_var)
+    cam_h_var      = tk.DoubleVar(value=cam_json.get("cam_height_m", DEFAULT_CAM_HEIGHT_M))
+    cam_tilt_var   = tk.DoubleVar(value=cam_json.get("tilt_deg",     DEFAULT_CAM_TILT_DEG))
+    cam_fov_var    = tk.DoubleVar(value=cam_json.get("fov_h_deg",    DEFAULT_CAM_FOV_H_DEG))
+    road_slope_var = tk.DoubleVar(value=cam_json.get("slope_deg",    DEFAULT_ROAD_SLOPE_DEG))
+    roi_top_var    = tk.DoubleVar(value=cam_json.get("roi_top",      AUTO_ROI_TOP))
+    roi_bot_var    = tk.DoubleVar(value=cam_json.get("roi_bot",      AUTO_ROI_BOT))
+    scale_w_var    = tk.DoubleVar(value=cam_json.get("scale_w",      1.0))
+    scale_l_var    = tk.DoubleVar(value=cam_json.get("scale_l",      1.0))
 
-    create_label(camf, "Tilt/depression angle (deg):")
-    cam_tilt_var = tk.DoubleVar(value=DEFAULT_CAM_TILT_DEG)
-    create_entry(camf, cam_tilt_var)
+    create_param_row(camf, "Height above road (m):",     cam_h_var,      1.0,  30.0, 0.5)
+    create_param_row(camf, "Tilt/depression angle (deg):", cam_tilt_var,  1.0,  89.0, 0.5)
+    create_param_row(camf, "Horizontal FOV (deg):",       cam_fov_var,   20.0, 120.0, 1.0)
+    create_param_row(camf, "Road slope (deg, uphill+):",  road_slope_var,-20.0, 20.0, 0.5)
+    create_param_row(camf, "ROI top  (smaller = farther):", roi_top_var,  0.05, 0.70, 0.01)
+    create_param_row(camf, "ROI bot  (larger  = closer):",  roi_bot_var,  0.30, 0.99, 0.01)
 
-    create_label(camf, "Horizontal FOV (deg):")
-    cam_fov_var = tk.DoubleVar(value=DEFAULT_CAM_FOV_H_DEG)
-    create_entry(camf, cam_fov_var)
+    tk.Frame(camf, bg="#333", height=1).pack(fill="x", pady=4)   # separator
 
-    create_label(camf, "Road slope (deg, uphill+):")
-    road_slope_var = tk.DoubleVar(value=DEFAULT_ROAD_SLOPE_DEG)
-    create_entry(camf, road_slope_var)
+    create_param_row(camf, "Scale width  (corr. W):",  scale_w_var, 0.3, 3.0, 0.05)
+    create_param_row(camf, "Scale length (corr. L):",  scale_l_var, 0.3, 3.0, 0.05)
 
-    # Live preview of computed W×L
+    # ── Smart coupling: keep roi_top < roi_bot with min gap ────────
+    _roi_lock = [False]
+    def _guard_roi_top(*_):
+        if _roi_lock[0]: return
+        _roi_lock[0] = True
+        try:
+            t, b = float(roi_top_var.get()), float(roi_bot_var.get())
+            if t >= b - 0.08:
+                roi_bot_var.set(round(min(0.99, t + 0.08), 2))
+        except Exception: pass
+        finally: _roi_lock[0] = False
+    def _guard_roi_bot(*_):
+        if _roi_lock[0]: return
+        _roi_lock[0] = True
+        try:
+            t, b = float(roi_top_var.get()), float(roi_bot_var.get())
+            if b <= t + 0.08:
+                roi_top_var.set(round(max(0.05, b - 0.08), 2))
+        except Exception: pass
+        finally: _roi_lock[0] = False
+    roi_top_var.trace_add("write", _guard_roi_top)
+    roi_bot_var.trace_add("write", _guard_roi_bot)
+
+    # Live preview of computed W×L (scaled)
     preview_var = tk.StringVar(value="W: --  L: --")
     tk.Label(camf, textvariable=preview_var, anchor="w",
              bg=COLOR_SIDEBAR_BG, fg="#7dffb3",
              font=("Consolas", 8), wraplength=220).pack(fill="x", pady=(4,0))
 
     def _preview_wl(*_):
-        """Compute and display projected W×L without closing the window."""
+        """Compute W×L and overlay calibration trapezoid on canvas (live preview)."""
         import math, numpy as np
         try:
             h  = float(cam_h_var.get())
             td = float(cam_tilt_var.get())
             fv = float(cam_fov_var.get())
             sl = float(road_slope_var.get())
+            rt = float(roi_top_var.get())
+            rb = float(roi_bot_var.get())
             fw, fh = img_size[0]
         except Exception:
             preview_var.set("W: ?  L: ?")
+            preview_roi_pts[0] = None
             return
         try:
             theta = math.radians(td);  alpha = math.radians(sl)
-            f  = (fw / 2.0) / math.tan(math.radians(fv) / 2.0)
+            f_px  = (fw / 2.0) / math.tan(math.radians(fv) / 2.0)
             cx, cy = fw / 2.0, fh / 2.0
-            R = [[1, 0, 0],
-                 [0, -math.sin(theta),  math.cos(theta)],
-                 [0, -math.cos(theta), -math.sin(theta)]]
-            C = [0.0, 0.0, h]
-            n = [0.0, -math.sin(alpha), math.cos(alpha)]
-            nC = n[1]*C[1] + n[2]*C[2]
-            corners = [
-                (int(fw*0.10), int(fh*0.35)), (int(fw*0.90), int(fh*0.35)),
-                (int(fw*0.10), int(fh*0.90)), (int(fw*0.90), int(fh*0.90)),
-            ]
-            pts = []
-            for u, v in corners:
-                dc = [(u-cx)/f, (v-cy)/f, 1.0]
-                dw = [R[r][0]*dc[0]+R[r][1]*dc[1]+R[r][2]*dc[2] for r in range(3)]
-                denom = n[0]*dw[0]+n[1]*dw[1]+n[2]*dw[2]
-                if abs(denom) < 1e-9: raise ValueError
-                t = -nC / denom
-                if t < 0: raise ValueError
-                pts.append((C[0]+t*dw[0], C[1]+t*dw[1]))
-            xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-            W = max(xs)-min(xs);  L = max(ys)-min(ys)
-            preview_var.set(f"ROI → W:{W:.1f}m  L:{L:.1f}m")
+            R = np.array([[1, 0,               0             ],
+                          [0, -math.sin(theta), math.cos(theta)],
+                          [0, -math.cos(theta),-math.sin(theta)]])
+            C   = np.array([0.0, 0.0, h])
+            n_p = np.array([0.0, -math.sin(alpha), math.cos(alpha)])
+            nC  = float(n_p @ C)
+
+            def i2w(u, v):
+                dc = np.array([(u-cx)/f_px, (v-cy)/f_px, 1.0])
+                dw = R @ dc
+                den = float(n_p @ dw)
+                if abs(den) < 1e-9: return None
+                t = -nC / den
+                if t < 0: return None
+                P = C + t * dw
+                return float(P[0]), float(P[1])
+
+            def w2i(Xw, Yw):
+                cam = R.T @ (np.array([Xw, Yw, 0.0]) - C)
+                if cam[2] <= 1e-9: return None
+                return cx + f_px*cam[0]/cam[2], cy + f_px*cam[1]/cam[2]
+
+            # World-rectangle approach (identical to apply_camera_params)
+            bl = i2w(fw*AUTO_ROI_LEFT, fh*rb)
+            br = i2w(fw*AUTO_ROI_RIGHT, fh*rb)
+            tl_ref = i2w(fw*AUTO_ROI_LEFT, fh*rt)
+            if any(p is None for p in [bl, br, tl_ref]):
+                raise ValueError("projection failed")
+
+            X_l, X_r = bl[0], br[0]
+            Y_near    = (bl[1] + br[1]) / 2.0
+            Y_far     = tl_ref[1]
+            if X_r <= X_l or Y_far <= Y_near:
+                raise ValueError("degenerate geometry")
+
+            W = X_r - X_l;  L = Y_far - Y_near
+            sw = float(scale_w_var.get()); sl_v = float(scale_l_var.get())
+            preview_var.set(f"ROI → W:{W*sw:.1f}m  L:{L*sl_v:.1f}m")
+
+            # Back-project far corners to image for visual preview
+            i_tl = w2i(X_l, Y_far)
+            i_tr = w2i(X_r, Y_far)
+            i_bl = (fw*AUTO_ROI_LEFT,  fh*rb)
+            i_br = (fw*AUTO_ROI_RIGHT, fh*rb)
+            if i_tl is not None and i_tr is not None:
+                preview_roi_pts[0] = [
+                    [int(i_tl[0]), int(i_tl[1])],
+                    [int(i_tr[0]), int(i_tr[1])],
+                    [int(i_bl[0]), int(i_bl[1])],
+                    [int(i_br[0]), int(i_br[1])],
+                ]
+            else:
+                preview_roi_pts[0] = None
         except Exception:
             preview_var.set("W: err  L: err (check params)")
+            preview_roi_pts[0] = None
 
-    for var in (cam_h_var, cam_tilt_var, cam_fov_var, road_slope_var):
+        try:
+            if mode_var.get() == "auto":
+                render_frame()
+        except Exception:
+            pass
+
+    for var in (cam_h_var, cam_tilt_var, cam_fov_var, road_slope_var,
+                roi_top_var, roi_bot_var, scale_w_var, scale_l_var):
         var.trace_add("write", _preview_wl)
 
     def _show_3d_preview(*_):
@@ -344,7 +483,7 @@ def run_calibration_window(video_path, calibrator):
             status_var.set("Need h>0, tilt 1–89°, FOV 1–179°.")
             return
 
-        # ── project ROI corners onto the (possibly sloped) road plane ─────
+        # ── World-rectangle projection (matches apply_camera_params logic) ──
         theta = _m.radians(td);  alpha = _m.radians(sl)
         f_px  = (fw / 2.0) / _m.tan(_m.radians(fv) / 2.0)
         cx, cy = fw / 2.0, fh / 2.0
@@ -355,31 +494,52 @@ def run_calibration_window(video_path, calibrator):
         n_p = _np.array([0.0, -_m.sin(alpha), _m.cos(alpha)])
         nC  = float(n_p @ C)
 
-        img_corners = [
-            (int(fw * 0.10), int(fh * 0.35)),   # TL
-            (int(fw * 0.90), int(fh * 0.35)),   # TR
-            (int(fw * 0.10), int(fh * 0.90)),   # BL
-            (int(fw * 0.90), int(fh * 0.90)),   # BR
-        ]
-        gpts = []
-        for u, v in img_corners:
-            dc  = _np.array([(u - cx) / f_px, (v - cy) / f_px, 1.0])
-            dw  = R @ dc
+        def _i2w(u, v):
+            dc = _np.array([(u-cx)/f_px, (v-cy)/f_px, 1.0])
+            dw = R @ dc
             den = float(n_p @ dw)
-            if abs(den) < 1e-9:
-                status_var.set("Ray parallel to road — adjust tilt."); return
+            if abs(den) < 1e-9: return None
             t = -nC / den
-            if t < 0:
-                status_var.set("Ray behind camera — increase tilt."); return
-            gpts.append(C + t * dw)        # 3-D point on ground
+            if t < 0: return None
+            return C + t * dw
 
-        tl3, tr3, bl3, br3 = gpts
-        all_x = [p[0] for p in gpts];  all_y = [p[1] for p in gpts]
-        W = max(all_x) - min(all_x)
-        L = max(all_y) - min(all_y)
-        near_y = min(all_y);  far_y = max(all_y)
-        gx0, gx1 = min(all_x) - 1, max(all_x) + 1
-        gy0, gy1 = near_y - 2,     far_y  + 2
+        def _w2i(Xw, Yw):
+            cam = R.T @ (_np.array([Xw, Yw, 0.0]) - C)
+            if cam[2] <= 1e-9: return None
+            return cx + f_px*cam[0]/cam[2], cy + f_px*cam[1]/cam[2]
+
+        rl, rr = AUTO_ROI_LEFT, AUTO_ROI_RIGHT
+        rt, rb = float(roi_top_var.get()), float(roi_bot_var.get())
+
+        # Near edge (bottom row) → world
+        bl_w = _i2w(fw*rl, fh*rb);  br_w = _i2w(fw*rr, fh*rb)
+        tl_ref = _i2w(fw*rl, fh*rt)
+        if any(p is None for p in [bl_w, br_w, tl_ref]):
+            status_var.set("Projection failed — adjust tilt/height."); return
+
+        X_l, X_r = float(bl_w[0]), float(br_w[0])
+        Y_near   = (float(bl_w[1]) + float(br_w[1])) / 2.0
+        Y_far    = float(tl_ref[1])
+        if X_r <= X_l or Y_far <= Y_near:
+            status_var.set("Degenerate geometry — check params."); return
+
+        W = X_r - X_l;  L = Y_far - Y_near
+
+        # World RECTANGLE corners (same width near and far)
+        bl3 = _np.array([X_l, Y_near, 0.0])
+        br3 = _np.array([X_r, Y_near, 0.0])
+        tl3 = _np.array([X_l, Y_far,  0.0])
+        tr3 = _np.array([X_r, Y_far,  0.0])
+        gpts = [tl3, tr3, bl3, br3]
+
+        # Back-projected image points (trapezoidal ROI)
+        i_tl = _w2i(X_l, Y_far);  i_tr = _w2i(X_r, Y_far)
+        i_bl = (fw*rl, fh*rb);     i_br = (fw*rr, fh*rb)
+
+        near_y = Y_near;  far_y = Y_far
+        all_x  = [X_l, X_r]
+        gx0, gx1 = X_l - 1, X_r + 1
+        gy0, gy1 = Y_near - 2, Y_far + 2
 
         # ── Tk toplevel ───────────────────────────────────────────────────
         win = tk.Toplevel(root)
@@ -406,8 +566,8 @@ def run_calibration_window(video_path, calibrator):
             ax3.set_proj_type('persp', focal_length=0.35)
         except TypeError:
             ax3.set_proj_type('persp')
-        # View from behind camera looking forward (+Y); elevation matches tilt
-        ax3.view_init(elev=max(td + 5, 15), azim=-90)
+        # Low-angle perspective: near edge (BL/BR) appears large, far edge small
+        ax3.view_init(elev=22, azim=-75)
 
         # Ground grid
         for gy in _np.arange(_m.floor(gy0), _m.ceil(gy1) + 1, 2):
@@ -415,10 +575,16 @@ def run_calibration_window(video_path, calibrator):
         for gx in _np.arange(_m.floor(gx0), _m.ceil(gx1) + 1, 2):
             ax3.plot([gx, gx], [gy0, gy1], [0, 0], color="#2a2a2a", lw=0.6)
 
-        # ROI footprint — filled polygon on ground
+        # ROI footprint — world RECTANGLE on ground
         roi_v = [[[p[0], p[1], 0] for p in [tl3, tr3, br3, bl3]]]
         ax3.add_collection3d(Poly3DCollection(
-            roi_v, alpha=0.25, facecolor="#00d4ff", edgecolor="#00d4ff", lw=2))
+            roi_v, alpha=0.20, facecolor="#00d4ff", edgecolor="#00d4ff", lw=1.5))
+        # Near edge highlighted (wide/close)
+        ax3.plot([bl3[0], br3[0]], [bl3[1], br3[1]], [0, 0],
+                 color="#ff9f43", lw=2.5, label="Near")
+        # Far edge highlighted (narrow/distant)
+        ax3.plot([tl3[0], tr3[0]], [tl3[1], tr3[1]], [0, 0],
+                 color="#6ab04c", lw=2.5, label="Far")
 
         # Frustum rays: camera → each ground corner
         ray_colors = ["#ff6b6b", "#4ecdc4", "#ff9f43", "#a29bfe"]
@@ -593,12 +759,30 @@ def run_calibration_window(video_path, calibrator):
     root.protocol("WM_DELETE_WINDOW", lambda: (result.__setitem__(0,"default"), root.quit()))
 
     render_frame()
+    _refresh_mode()   # apply initial mode from JSON (shows camf panel if mode=="auto")
     root.mainloop()
     root.destroy()
 
 # =============================================================================
 # Apply result
 # =============================================================================
+    def _save_json(mode, extra=None):
+        """Persist current camera params to per-video TXT for next session."""
+        data = {"mode":         mode,
+                "cam_height_m": cam_json.get("cam_height_m", DEFAULT_CAM_HEIGHT_M),
+                "tilt_deg":     cam_json.get("tilt_deg",     DEFAULT_CAM_TILT_DEG),
+                "fov_h_deg":    cam_json.get("fov_h_deg",    DEFAULT_CAM_FOV_H_DEG),
+                "slope_deg":    cam_json.get("slope_deg",    DEFAULT_ROAD_SLOPE_DEG)}
+        if extra: data.update(extra)
+        try:
+            with open(txt_path, "w", encoding="utf-8") as ft:
+                ft.write("# Camera calibration params — edit values then reopen video\n")
+                for k, v in data.items():
+                    ft.write(f"{k}={v}\n")
+            print(f"[Calibration] Saved camera params → {txt_path}")
+        except Exception as e:
+            print(f"[Calibration] Could not save TXT: {e}")
+
     if result[0] == "new":
         try:
             w_m = float(width_var.get())
@@ -607,6 +791,7 @@ def run_calibration_window(video_path, calibrator):
             w_m, l_m = ROAD_WIDTH_M, ROAD_LENGTH_M
         calibrator.apply_points(clicked, w_m, l_m)
         calibrator.save(cal_path)
+        _save_json("manual", {"width_m": w_m, "length_m": l_m})
         return True
 
     elif result[0] == "auto":
@@ -615,13 +800,23 @@ def run_calibration_window(video_path, calibrator):
             td = float(cam_tilt_var.get())
             fv = float(cam_fov_var.get())
             sl = float(road_slope_var.get())
+            rt = float(roi_top_var.get())
+            rb = float(roi_bot_var.get())
+            sw = float(scale_w_var.get())
+            sl2= float(scale_l_var.get())
             fw, fh = img_size[0]
         except Exception as e:
             print(f"[AutoCal] Error reading params: {e}. Using default.")
             calibrator.set_default()
             return True
-        calibrator.apply_camera_params(fw, fh, h, td, fv, sl)
+        calibrator.apply_camera_params(fw, fh, h, td, fv, sl,
+                                       roi_top=rt, roi_bot=rb,
+                                       scale_w=sw, scale_l=sl2)
         calibrator.save(cal_path)
+        _save_json("auto", {"cam_height_m": h, "tilt_deg": td,
+                             "fov_h_deg": fv, "slope_deg": sl,
+                             "roi_top": rt, "roi_bot": rb,
+                             "scale_w": sw, "scale_l": sl2})
         return True
 
     elif result[0] == "load":

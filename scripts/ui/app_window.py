@@ -10,37 +10,44 @@ class AppWindow:
     def __init__(self, video_w, video_h,
                  on_reset, on_pause, on_quit,
                  on_screenshot, on_load_video, on_seek,
-                 on_scale, scale_factor,
-                 total_frames, fps_src):
+                 total_frames, fps_src,
+                 on_replay=None):
 
         self.video_w  = video_w
         self.video_h  = video_h
-        self._on_quit = on_quit
-        self._on_seek = on_seek
-        self._total   = total_frames
-        self._alive   = True
+        self._on_quit   = on_quit
+        self._on_seek   = on_seek
+        self._on_replay = on_replay
+        self._total     = total_frames
+        self._alive     = True
+        self._seek_lock = False   # prevent update_stats from triggering seek
 
         self.root = tk.Tk()
         self.root.title("Vehicle Speed Estimation")
         self.root.protocol("WM_DELETE_WINDOW", self._hard_quit)
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
+        self.root.configure(bg="black")
         self.root.geometry(f"{video_w + SIDEBAR_W}x{video_h}")
+        self.root.state("zoomed")
+        self.root.update_idletasks()   # flush geometry before first frame
 
 # =============================================================================
 # Canvas
 # =============================================================================
-        self.canvas = tk.Canvas(self.root, width=video_w, height=video_h,
-                                bg="black", highlightthickness=0)
+        self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self._photo = None
 
 # =============================================================================
 # Sidebar
 # =============================================================================
+        self.root.rowconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=1)
+        self.root.columnconfigure(1, minsize=SIDEBAR_W)
+
         sb = tk.Frame(self.root, bg=COLOR_SIDEBAR_BG, width=SIDEBAR_W)
         sb.grid(row=0, column=1, sticky="nsew")
         sb.grid_propagate(False)
-        self.root.columnconfigure(1, minsize=SIDEBAR_W)
 
         create_label_title(sb, "CONTROLS")
 
@@ -66,7 +73,8 @@ class AppWindow:
         self._seek_v = tk.IntVar(value=0)
         ttk.Scale(vf, from_=0, to=max(total_frames-1,1),
                   orient="horizontal", variable=self._seek_v,
-                  command=lambda v: self._on_seek(int(float(v)))
+                  command=lambda v: (None if self._seek_lock
+                                     else self._on_seek(int(float(v))))
                   ).pack(fill="x", pady=(4,2))
         ff = tk.Frame(vf, bg="#1a1a2e")
         ff.pack(fill="x")
@@ -81,32 +89,28 @@ class AppWindow:
             create_button_inline(ff, text=lbl, command=lambda d=df: self._seek_rel(d))
 
 # =============================================================================
-# Speed Scale
-# =============================================================================
-        xf = create_label_frame(sb, "Speed Scale Factor")
-        tk.Label(xf, text="Nhân tốc độ ×:", anchor="w",
-                 bg="#1a1a2e", fg="#ccc", font=("Consolas", 9)).pack(fill="x")
-        self._scale_v = tk.DoubleVar(value=scale_factor)
-        row = tk.Frame(xf, bg="#1a1a2e"); row.pack(fill="x", pady=(2, 4))
-        tk.Entry(row, textvariable=self._scale_v, width=8,
-                 bg="#2d2d44", fg="white", insertbackground="white",
-                 font=("Consolas", 10)).pack(side="left", padx=(0, 6))
-        create_button_inline(row, text="Áp dụng",
-                             command=lambda: on_scale(self._scale_v.get()))
-
-# =============================================================================
 # Buttons
 # =============================================================================
         bf = create_label_frame(sb, "Actions")
         for text, cmd in [
             ("Pause / Resume  [SPACE]", on_pause),
-            ("Reset Tracker   [R]", on_reset),
-            ("Screenshot      [S]", on_screenshot),
-            ("Replay Video    ", self._replay),
-            ("Load New Video  [L]", on_load_video),
-            ("Quit            [ESC]", self._hard_quit),
+            ("Reset Tracker   [R]",     on_reset),
+            ("Screenshot      [S]",     on_screenshot),
+            ("Replay Video    [R]",     self._replay),
+            ("Load New Video  [L]",     on_load_video),
+            ("Quit            [ESC]",   self._hard_quit),
         ]:
             create_button(bf, text=text, command=cmd)
+
+        # Screenshot status notification
+        self._status_v = tk.StringVar(value="")
+        tk.Label(bf, textvariable=self._status_v, anchor="w",
+                 bg=COLOR_SIDEBAR_BG, fg="#7dffb3",
+                 font=("Consolas", 9), wraplength=260
+                 ).pack(fill="x", pady=(4, 0))
+
+        # Spacer — push content to top in tall windows
+        tk.Frame(sb, bg=COLOR_SIDEBAR_BG).pack(fill="both", expand=True)
             
     def _seek_rel(self, delta):
         t = max(0, min(self._total-1, self._seek_v.get() + delta))
@@ -114,8 +118,19 @@ class AppWindow:
         self._on_seek(t)
 
     def _replay(self):
+        self._seek_lock = True
         self._seek_v.set(0)
-        self._on_seek(0)
+        self._seek_lock = False
+        if self._on_replay:
+            self._on_replay()   # seek to 0 + unpause
+        else:
+            self._on_seek(0)
+
+    def show_status(self, msg, ms=3000):
+        """Show a temporary status message in the sidebar."""
+        if not self._alive: return
+        self._status_v.set(msg)
+        self.root.after(ms, lambda: self._status_v.set("") if self._alive else None)
 
     def _hard_quit(self):
         """Immediately destroy window and signal quit — no confirm dialog."""
@@ -126,6 +141,10 @@ class AppWindow:
 
     def update_frame(self, bgr_frame):
         import PIL.Image, PIL.ImageTk
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw > 1 and ch > 1:
+            bgr_frame = cv2.resize(bgr_frame, (cw, ch), interpolation=cv2.INTER_LINEAR)
         rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
         self._photo = PIL.ImageTk.PhotoImage(PIL.Image.fromarray(rgb))
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
@@ -137,7 +156,9 @@ class AppWindow:
         self._cv.set(f"Homography: {'Calibrated' if cal else 'Default'}")
         self._sv.set("Status: " + (
             "Finished" if stopped else "PAUSED" if paused else "Running"))
+        self._seek_lock = True
         self._seek_v.set(frame_no)
+        self._seek_lock = False
         self._pos_v.set(f"Frame: {frame_no} / {self._total}")
         self.root.update()
 

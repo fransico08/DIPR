@@ -1,26 +1,26 @@
 import tkinter as tk
 
-FONT_TITLE = ("Consolas", 11, "bold")
-FONT_NORMAL = ("Consolas", 9)
-FONT_SMALL = ("Consolas", 8)
+FONT_TITLE = ("Consolas", 13, "bold")
+FONT_NORMAL = ("Consolas", 10)
+FONT_SMALL = ("Consolas", 9)
 
-SIDEBAR_W = 280
+SIDEBAR_W = 290
 COLOR_SIDEBAR_BG = "#1a1a2e"
-COLOR_HEADER_BG = "#16213e"
-COLOR_HEADER_FG = "#80d2ff"
-COLOR_FRAME_FG = "#aaa"
-COLOR_LABEL_FG = "#ccc"
-COLOR_ENTRY_BG = "#2c3e50"
-COLOR_BUTTON = "#457b9d"
+COLOR_HEADER_BG = "#0f3460"
+COLOR_HEADER_FG = "#00d4ff"
+COLOR_FRAME_FG  = "#c0c0c0"
+COLOR_LABEL_FG  = "#e8e8e8"
+COLOR_ENTRY_BG  = "#2c3e50"
+COLOR_BUTTON    = "#457b9d"
 
 def create_label_title(parent, text):
     label = tk.Label(
         parent,
-        text="CONTROLS",
+        text=text,
         bg=COLOR_HEADER_BG,
         fg=COLOR_HEADER_FG,
         font=FONT_TITLE,
-        pady=8
+        pady=10
     )
     label.pack(fill="x")
     return label
@@ -76,6 +76,23 @@ def create_entry(parent, variable):
 
     entry.pack(fill="x", pady=2)
     return entry
+
+def create_param_row(parent, label_text, var, from_, to, step=0.1):
+    """Compact label + [entry | slider] row for numeric parameters."""
+    tk.Label(parent, text=label_text, anchor="w",
+             bg=COLOR_SIDEBAR_BG, fg=COLOR_LABEL_FG, font=FONT_SMALL
+             ).pack(fill="x")
+    row = tk.Frame(parent, bg=COLOR_SIDEBAR_BG)
+    row.pack(fill="x", pady=(0, 3))
+    entry = tk.Entry(row, textvariable=var, width=7, font=FONT_SMALL,
+                     bg=COLOR_ENTRY_BG, fg="white", insertbackground="white")
+    entry.pack(side="left", padx=(0, 3))
+    slider = tk.Scale(row, variable=var, from_=from_, to=to, resolution=step,
+                      orient="horizontal", bg=COLOR_SIDEBAR_BG, fg="#888",
+                      troughcolor=COLOR_ENTRY_BG, activebackground=COLOR_BUTTON,
+                      highlightthickness=0, bd=0, showvalue=False, takefocus=False)
+    slider.pack(side="left", fill="x", expand=True)
+    return entry, slider
 
 def create_button(parent, text, command):
     button = tk.Button(
