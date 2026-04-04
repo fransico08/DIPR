@@ -934,15 +934,3 @@ def _draw_roi_enhanced(frame: np.ndarray, pts: list) -> None:
                       (20, 20, 20), -1)
         cv2.putText(frame, label_text, (lx, ly),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, 1, cv2.LINE_AA)
-
-    # ── "ROI" badge at center of far edge ─────────────────────
-    cx = (tl[0] + tr[0]) // 2
-    cy = (tl[1] + tr[1]) // 2 - 14
-    badge = "CALIBRATION ZONE"
-    (bw, bh), _ = cv2.getTextSize(badge, cv2.FONT_HERSHEY_DUPLEX, 0.45, 1)
-    cv2.rectangle(frame, (cx - bw//2 - 5, cy - bh - 4),
-                  (cx + bw//2 + 5, cy + 4), (10, 10, 30), -1)
-    cv2.rectangle(frame, (cx - bw//2 - 5, cy - bh - 4),
-                  (cx + bw//2 + 5, cy + 4), (0, 220, 255), 1, cv2.LINE_AA)
-    cv2.putText(frame, badge, (cx - bw//2, cy),
-                cv2.FONT_HERSHEY_DUPLEX, 0.45, (0, 220, 255), 1, cv2.LINE_AA)
