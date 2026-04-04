@@ -103,22 +103,27 @@ The system processes video frames through a complete DIP/CV pipeline: detection 
 DIPR-vehicle-speed-estimation/
 │
 ├── scripts/
-│   ├── main.py                      # Entry point — pipeline, calibrator, speed estimator
-│   ├── config.py                    # All configurable parameters
-│   ├── yolov8n.pt                   # YOLOv8-Nano pretrained weights
+│   ├── main.py                      # Entry point — AppController, Pipeline (daemon thread)
+│   ├── config.py                    # Tất cả hằng số cấu hình (không magic number ở file khác)
+│   ├── yolov8n.pt                   # Trọng số YOLOv8-Nano (COCO pretrained)
+│   │
+│   ├── core/
+│   │   ├── calibration.py           # HomographyCalibrator (Manual + Auto camera params)
+│   │   ├── speed_estimator.py       # SpeedEstimator (5 lớp ổn định: px EMA → path → spike → EMA → deadband)
+│   │   └── tracker.py               # make_tracker() + compute_embeddings() (DeepSORT + HSV 96D)
 │   │
 │   ├── ui/
-│   │   ├── app_window.py            # Main GUI — video canvas + sidebar controls
-│   │   └── calibration_window.py    # Calibration GUI — Manual/Auto + 3D preview
+│   │   ├── unified_window.py        # Cửa sổ chính hợp nhất (top bar + calibration + tracking)
+│   │   ├── app_window.py            # Tracking GUI — video canvas + sidebar controls
+│   │   └── calibration_window.py    # Calibration GUI standalone
 │   │
 │   └── utils/
-│       ├── drawing.py               # draw_track, draw_roi, draw_hud
-│       ├── frame_reader.py          # Threaded video reader with queue
-│       ├── screen.py                # Screen size & fit-to-screen utilities
-│       └── ui_helpers.py            # Shared Tkinter UI components & constants
+│       ├── drawing.py               # draw_track, draw_roi (gradient), draw_hud, draw_roi_quad
+│       ├── frame_reader.py          # Threaded video reader với queue + replay()
+│       ├── screen.py                # get_screen_size() + fit_to_screen()
+│       └── ui_helpers.py            # Shared Tkinter components (label, entry, button, param_row)
 │
-├── videos/                          # Input video files
-├── calibration.npz                  # Saved calibration data (auto-generated)
+├── videos/                          # Video đầu vào + file *_cal.json (auto-generated)
 │
 ├── .gitignore
 ├── CONTRIBUTING.md
