@@ -1,0 +1,8 @@
+{
+  "cam_height_m": 1.2,
+  "cam_tilt_deg": 20.0,
+  "fov_h_deg": 31.0,
+  "road_slope_deg": 2.0,
+  "road_width_m": 7.0,
+  "road_depth_m": 23.0
+}
