@@ -27,26 +27,37 @@ class AppWindow:
         self.root.protocol("WM_DELETE_WINDOW", self._hard_quit)
         self.root.resizable(True, True)
         self.root.configure(bg="black")
-        self.root.geometry(f"{video_w + SIDEBAR_W}x{video_h}")
-        self.root.state("zoomed")
+        self.root.attributes("-fullscreen", True)
+        self.root.bind("<Escape>", lambda event: self._hard_quit())
         self.root.update_idletasks()   # flush geometry before first frame
+
+        self.root.rowconfigure(0, weight=0)
+        self.root.rowconfigure(1, weight=1)
+        self.root.columnconfigure(0, weight=1)
+        self.root.columnconfigure(1, minsize=SIDEBAR_W, weight=0)
+
+# =============================================================================
+# Banner
+# =============================================================================
+        header = tk.Frame(self.root, bg=COLOR_HEADER_BG)
+        header.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        tk.Label(header,
+                 text="Bùi Duy Phong - 19110131   |   Huỳnh Minh Tài - 22110068   |   Lê Minh Ngọc - 22110056",
+                 bg=COLOR_HEADER_BG, fg=COLOR_HEADER_FG,
+                 font=("Consolas", 12, "bold"), pady=10).pack(fill="x")
 
 # =============================================================================
 # Canvas
 # =============================================================================
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.grid(row=1, column=0, sticky="nsew")
         self._photo = None
 
 # =============================================================================
 # Sidebar
 # =============================================================================
-        self.root.rowconfigure(0, weight=1)
-        self.root.columnconfigure(0, weight=1)
-        self.root.columnconfigure(1, minsize=SIDEBAR_W)
-
         sb = tk.Frame(self.root, bg=COLOR_SIDEBAR_BG, width=SIDEBAR_W)
-        sb.grid(row=0, column=1, sticky="nsew")
+        sb.grid(row=1, column=1, sticky="nsew")
         sb.grid_propagate(False)
 
         create_label_title(sb, "CONTROLS")
@@ -143,10 +154,12 @@ class AppWindow:
         import PIL.Image, PIL.ImageTk
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
-        if cw > 1 and ch > 1:
-            bgr_frame = cv2.resize(bgr_frame, (cw, ch), interpolation=cv2.INTER_LINEAR)
+        if cw <= 1 or ch <= 1:
+            return
+        bgr_frame = cv2.resize(bgr_frame, (cw, ch), interpolation=cv2.INTER_LINEAR)
         rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
         self._photo = PIL.ImageTk.PhotoImage(PIL.Image.fromarray(rgb))
+        self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
 
     def update_stats(self, fps, tracked, cal, paused, stopped, frame_no):
