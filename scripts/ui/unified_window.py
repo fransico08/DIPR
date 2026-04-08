@@ -237,7 +237,7 @@ class UnifiedWindow:
 
         # ── Root ──────────────────────────────────────────────
         self.root = tk.Tk()
-        self.root.title("Vehicle Speed Estimation")
+        self.root.title("GROUP 2 - VEHICLE SPEED ESTIMATION USING A SINGLE CAMERA AND COMPUTER VISION TECHNIQUES")
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         self.root.resizable(True, True)
         self._fullscreen = False
@@ -274,22 +274,35 @@ class UnifiedWindow:
 
         tk.Label(
             self._welcome_page,
-            text="Vehicle Speed Estimation",
-            bg="#0d1117", fg="#80d2ff",
+            text="DIGITAL IMAGE PROCESSING",
+            bg="#0d1117", fg="#42f58d",
             font=("Consolas", 18, "bold"),
-        ).pack(pady=(80, 10))
+        ).pack(pady=(80, 2))
+        
+        tk.Label(
+            self._welcome_page,
+            text="VEHICLE SPEED ESTIMATION USING A SINGLE CAMERA AND COMPUTER VISION TECHNIQUES",
+            bg="#0d1117", fg="#80d2ff",
+            font=("Consolas", 25, "bold"),
+        ).pack(pady=(80, 5))
 
         tk.Label(
             self._welcome_page,
-            text="Click  Open Video  in the toolbar to begin.",
+            text="GROUP 2",
+            bg="#0d1117", fg="#42f58d",
+            font=("Consolas", 16, "bold"),
+        ).pack(pady=(80, 5))
+        
+        tk.Label(
+            self._welcome_page,
+            text="Bùi Duy Phong - 19110131\nHuỳnh Minh Tài - 22110068\nLê Minh Ngọc - 22110056",
             bg="#0d1117", fg="#aaa",
-            font=("Consolas", 11),
+            font=("Consolas", 13),
         ).pack(pady=6)
 
     def _show_welcome(self):
         self._welcome_page.tkraise()
-        self.root.geometry(f"700x400")
-        self.root.title("Vehicle Speed Estimation — No Video")
+        self.root.state('zoomed') 
 
     # ── Two-phase init (call after pipeline knows video size) ─
 
