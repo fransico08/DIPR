@@ -239,7 +239,10 @@ class UnifiedWindow:
         self.root = tk.Tk()
         self.root.title("Vehicle Speed Estimation")
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
+        self._fullscreen = False
+        self.root.bind("<F11>", lambda event: self._toggle_fullscreen())
+        self.root.bind("<Escape>", lambda event: self._exit_fullscreen())
 
         # Container holds both screens at the same grid cell
         self._build_topbar()
@@ -414,7 +417,24 @@ class UnifiedWindow:
         btn("Open Video", self._open_video, COLOR_BTN_DEFAULT).pack(side="left", padx=6, pady=4)
         btn("Calibration", self._go_calibration, COLOR_BTN_DEFAULT).pack(side="left", padx=6)
         btn("Tracking", self._go_tracking, COLOR_BTN_DEFAULT).pack(side="left", padx=6)
+        btn("Fullscreen", self._toggle_fullscreen, COLOR_BTN_DEFAULT).pack(side="left", padx=6)
         btn("Quit", self._quit, COLOR_BTN_DANGER).pack(side="left", padx=6)
+
+        tk.Label(
+            bar,
+            text="Bùi Duy Phong - 19110131   |   Huỳnh Minh Tài - 22110068   |   Lê Minh Ngọc - 22110056",
+            bg="#1f2a36", fg="white",
+            font=FONT_SMALL,
+        ).pack(side="right", padx=12)
+
+    def _toggle_fullscreen(self):
+        self._fullscreen = not self._fullscreen
+        self.root.attributes("-fullscreen", self._fullscreen)
+
+    def _exit_fullscreen(self):
+        if self._fullscreen:
+            self._fullscreen = False
+            self.root.attributes("-fullscreen", False)
 
     # ─────────────────────────────────────────────────────────
     #  SCREEN: CALIBRATION
@@ -572,7 +592,13 @@ class UnifiedWindow:
             _draw_roi_enhanced(f, pts)
         rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
         self._cal_photo = PIL.ImageTk.PhotoImage(PIL.Image.fromarray(rgb))
-        self._cal_canvas.create_image(0, 0, anchor="nw", image=self._cal_photo)
+        self._cal_canvas.delete("all")
+        canvas_w = self._cal_canvas.winfo_width() or self._disp_w
+        canvas_h = self._cal_canvas.winfo_height() or self._disp_h
+        self._cal_canvas.create_image(canvas_w // 2,
+                                      canvas_h // 2,
+                                      anchor="center",
+                                      image=self._cal_photo)
 
     def _cal_save(self):
         p = self._get_params()
@@ -755,7 +781,13 @@ class UnifiedWindow:
         import PIL.Image, PIL.ImageTk
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         self._photo_ref = PIL.ImageTk.PhotoImage(PIL.Image.fromarray(rgb))
-        self._vid_canvas.create_image(0, 0, anchor="nw", image=self._photo_ref)
+        self._vid_canvas.delete("all")
+        canvas_w = self._vid_canvas.winfo_width() or self._disp_w
+        canvas_h = self._vid_canvas.winfo_height() or self._disp_h
+        self._vid_canvas.create_image(canvas_w // 2,
+                                      canvas_h // 2,
+                                      anchor="center",
+                                      image=self._photo_ref)
 
     # ── Screen switching ──────────────────────────────────────
 
