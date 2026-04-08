@@ -335,13 +335,9 @@ class UnifiedWindow:
             self._build_tracking_screen()
             self._screens_built = True
         else:
-            # Rebuild screens for new video
-            for widget in self._cal_page.winfo_children():
-                widget.destroy()
-            for widget in self._track_page.winfo_children():
-                widget.destroy()
-            self._build_calibration_screen()
-            self._build_tracking_screen()
+            # New video loaded: keep sidebar intact, only refresh values
+            self._refresh_calibration_sidebar()
+            self._refresh_tracking_sidebar()
 
         self.show_calibration()
 
@@ -407,6 +403,9 @@ class UnifiedWindow:
 
         canvas.bind("<MouseWheel>",
                     lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        
+        inner.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
 
         return inner
 
@@ -468,8 +467,7 @@ class UnifiedWindow:
 
     def _build_calibration_screen(self):
         pg = self._cal_page
-        self._cal_canvas, sb_outer = self._build_base_screen(self._cal_page)
-        sb = self._build_scrollable_sidebar(pg)
+        self._cal_canvas, sb = self._build_base_screen(self._cal_page)
 
         _header(sb, "CALIBRATION")
 
@@ -670,7 +668,6 @@ class UnifiedWindow:
     def _build_tracking_screen(self):
         pg = self._track_page
         self._vid_canvas, sb = self._build_base_screen(self._track_page)
-        sb = self._build_scrollable_sidebar(pg)
 
         _header(sb, "CONTROLS")
 
@@ -688,9 +685,10 @@ class UnifiedWindow:
         self._t_pos  = tk.StringVar(value="Frame: 0 / 0")
         _varlabel(vf, self._t_pos)
         self._seek_v = tk.IntVar(value=0)
-        _seekbar(vf, self._seek_v, self._total_frames,
+        self._seek_bar = _seekbar(vf, self._seek_v, self._total_frames,
                  lambda fn: self._cb_seek(fn), self)
-        ff = tk.Frame(vf, bg=COLOR_SIDEBAR_BG)
+        self._seek_btn_frame = tk.Frame(vf, bg=COLOR_SIDEBAR_BG)
+        ff = self._seek_btn_frame
         ff.pack(fill="x")
         for label, sec in [
             (f"<<{SEEK_STEP_LONG}s", -SEEK_STEP_LONG),
@@ -721,6 +719,58 @@ class UnifiedWindow:
         pg.bind_all("<space>", lambda e: self._cb_pause())
         pg.bind_all("<r>", lambda e: self._replay())
         pg.bind_all("<s>", lambda e: self._do_screenshot())
+
+    # ── Sidebar refresh (new video, no rebuild) ───────────────
+
+    def _refresh_calibration_sidebar(self):
+        """Load JSON for new video and push values into existing vars/sliders."""
+        saved = _load_config(self._video_path)
+
+        def _val(key, default):
+            return saved[key] if saved and key in saved else default
+
+        self._v_height.set(str(_val("cam_height_m",  CAM_HEIGHT_M_DEFAULT)))
+        self._v_tilt.set(  str(_val("cam_tilt_deg",   CAM_TILT_DEG_DEFAULT)))
+        self._v_fov.set(   str(_val("fov_h_deg",       CAM_FOV_H_DEG_DEFAULT)))
+        self._v_slope.set( str(_val("road_slope_deg", CAM_SLOPE_DEG_DEFAULT)))
+        self._v_width.set( str(_val("road_width_m",   CAM_ROAD_WIDTH_DEFAULT)))
+        self._v_depth.set( str(_val("road_depth_m",   CAM_ROAD_DEPTH_DEFAULT)))
+
+        self._cal_status.set("")
+
+        if saved:
+            self.root.after(150, self._do_preview)
+        else:
+            self._render_cal(None)
+
+    def _refresh_tracking_sidebar(self):
+        """Update seekbar range and position counter for new video."""
+        # Recreate seekbar with correct total_frames
+        # Only the Scale widget's 'to' value needs updating — easiest to
+        # call configure() on the stored reference.
+        if hasattr(self, "_seek_bar"):
+            self._seek_bar.configure(to=max(self._total_frames - 1, 1))
+        self._seek_v.set(0)
+        self._t_pos.set(f"Frame: 0 / {self._total_frames}")
+        self._t_fps.set("FPS: --")
+        self._t_tracked.set("Tracked: --")
+        self._t_cal.set("Homography: --")
+        self._t_status.set("Status: starting")
+        self._notice_v.set("")
+
+        # Rebuild seek-step buttons with new fps so second offsets are correct
+        if hasattr(self, "_seek_btn_frame"):
+            for w in self._seek_btn_frame.winfo_children():
+                w.destroy()
+            for label, sec in [
+                (f"<<{SEEK_STEP_LONG}s",  -SEEK_STEP_LONG),
+                (f"<{SEEK_STEP_SHORT}s",  -SEEK_STEP_SHORT),
+                (f"+{SEEK_STEP_SHORT}s>",  SEEK_STEP_SHORT),
+                (f"+{SEEK_STEP_LONG}s>>",  SEEK_STEP_LONG),
+            ]:
+                df = int(sec * self._fps_src)
+                _inline_btn(self._seek_btn_frame, label,
+                            lambda d=df: self._seek_rel(d))
 
     # ── Video frame / stats pushed from pipeline thread ───────
 
